@@ -1,0 +1,17 @@
+.env
+.venv/
+data/crm.db
+data/crm.db-*
+data/backups/
+data/config.json
+data/config.json.migrated
+data/products.json
+data/products.json.migrated
+data/server.out.log
+data/server.err.log
+data/server.pid
+node_modules/
+dist/
+.tools/
+/test-results/
+/playwright-report/

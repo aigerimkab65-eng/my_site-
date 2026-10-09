@@ -1,0 +1,10 @@
+These fonts are licensed under the SIL Open Font License (OFL), Version 1.1.
+
+Included files:
+- Montserrat-Regular.ttf, Montserrat-Medium.ttf, Montserrat-Bold.ttf
+  (Julieta Ulanovsky / The Montserrat Project)
+- CormorantGaramond-Bold.ttf (Catharsis Fonts / Cormorant)
+- NotoSans-Regular.ttf, NotoSans-Bold.ttf, NotoSerif-Bold.ttf
+  (Google Noto Fonts — fallback for Kazakh glyphs if needed)
+
+Full OFL text: https://openfontlicense.org/

@@ -1,0 +1,11 @@
+node_modules/
+.tools/
+.venv/
+dist/
+data/backups/
+data/*.db
+data/*.db-*
+data/server.out.log
+data/server.err.log
+test-results/
+playwright-report/

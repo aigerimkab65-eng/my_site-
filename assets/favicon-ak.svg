@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="AK">
+  <rect width="100" height="100" rx="20" fill="#f4efe7"/>
+  <!-- Interlocking AK monogram -->
+  <g fill="#222222" transform="translate(12 10) scale(0.95)">
+    <!-- A (left) -->
+    <path d="M28 6 L46 74 L38.5 74 L34.8 60 L22.2 60 L19 74 L11.5 74 L27 20 L4 94 L12 94 L22.5 56 Z"/>
+    <path d="M24 52 L33 52 L28.5 34 Z"/>
+    <!-- Shared stem + K -->
+    <rect x="39" y="6" width="7.2" height="68"/>
+    <path d="M46.2 38 L66 6 L74.5 6 L52.5 42 L74.5 74 L66 74 L46.2 46 Z"/>
+  </g>
+  <rect x="10" y="10" width="80" height="80" rx="14" fill="none" stroke="#b8955a" stroke-width="1.5" opacity="0.85"/>
+</svg>

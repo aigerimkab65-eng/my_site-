@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Айгерим — AI Creator & AI Content Manager. AI-контент и digital-решения для бизнеса и личных брендов."
+    />
+    <title>Aigerim Kabaeva — AI Creator</title>
+    <!-- PNG first: most reliable in Chrome/Safari; new filenames bust old favicon cache -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-ak-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-ak-16.png" />
+    <link rel="icon" href="/assets/favicon-ak.svg" type="image/svg+xml" />
+    <link rel="shortcut icon" href="/assets/favicon-ak.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#f4efe7" />
+    <script>
+      (function () {
+        try {
+          var lang = localStorage.getItem("site-lang");
+          if (lang === "kz" || lang === "en") {
+            document.documentElement.setAttribute("data-lang-pending", lang);
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500;1,600;1,700&family=Montserrat:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/assets/fonts/kz.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
