@@ -66,6 +66,21 @@ export default function Products({
   }, [lang]);
 
   const ids = useMemo(() => products.map((p) => p.id), [products]);
+
+  // Drop selections for products that disappeared after refresh.
+  useEffect(() => {
+    const alive = new Set(ids);
+    setSelected((prev) => {
+      let changed = false;
+      const next = new Set();
+      prev.forEach((id) => {
+        if (alive.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [ids]);
+
   const allSelected = ids.length > 0 && ids.every((id) => selected.has(id));
   const selectedCount = selected.size;
 

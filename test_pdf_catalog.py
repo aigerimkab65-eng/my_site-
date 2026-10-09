@@ -260,6 +260,50 @@ def test_catalog_all_products_order():
         httpd.shutdown()
 
 
+def test_catalog_concurrent_image_isolation():
+    """Parallel builds must not mix get_image callables (ThreadingHTTPServer)."""
+    import base64
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    def job(marker):
+        expected = {f"{marker}-{j}" for j in range(6)}
+
+        def img(pid):
+            time.sleep(0.005)
+            if pid not in expected:
+                raise AssertionError(f"cross-talk getter={marker} pid={pid}")
+            return png, "image/png"
+
+        products = [
+            {
+                "id": f"{marker}-{j}",
+                "name": f"{marker} {j}",
+                "price": j,
+                "currency": "kzt",
+                "kind": "product",
+                "description": "d",
+                "image": "x.png",
+            }
+            for j in range(6)
+        ]
+        data = build_catalog_pdf(products, lang="ru", get_image=img)
+        assert_true(data.startswith(b"%PDF"), "pdf magic")
+
+    errors = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futs = [pool.submit(job, f"T{i}") for i in range(16)]
+        for fut in as_completed(futs):
+            try:
+                fut.result()
+            except Exception as exc:
+                errors.append(str(exc))
+    assert_eq(errors, [], "no image cross-talk: " + "; ".join(errors[:3]))
+
+
 def main():
     tests = [
         ("catalog_unauthorized", test_catalog_unauthorized),
@@ -267,6 +311,7 @@ def main():
         ("catalog_empty_db", test_catalog_empty_db),
         ("catalog_edge_products", test_catalog_edge_products),
         ("catalog_all_products_order", test_catalog_all_products_order),
+        ("catalog_concurrent_image_isolation", test_catalog_concurrent_image_isolation),
     ]
     failed = []
     for name, fn in tests:

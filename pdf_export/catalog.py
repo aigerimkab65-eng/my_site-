@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import io
 import math
+from contextvars import ContextVar
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from reportlab.lib.colors import Color, HexColor
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
@@ -23,8 +23,8 @@ from pdf_export.fonts import (
 )
 from pdf_export.images import prepare_image_for_pdf
 
-# Optional image loader injected by server (avoids circular imports).
-_GetImage = None
+# Per-request image loader (safe under ThreadingHTTPServer).
+_GetImage: ContextVar[Optional[Callable]] = ContextVar("pdf_get_image", default=None)
 
 STRINGS = {
     "ru": {
@@ -90,13 +90,23 @@ def format_money(value, currency: str = "kzt") -> Optional[str]:
         return f"$ {int_part}{frac}"
     if code == "rub":
         return f"{int_part}{frac} ₽"
-    # Prefer tenge sign; config fonts include it.
     return f"{int_part}{frac} ₸"
 
 
-def _wrap_lines(c: canvas.Canvas, text: str, font: str, size: float, max_w: float, max_lines: int) -> List[str]:
+def _ellipsis_fit(c: canvas.Canvas, text: str, font: str, size: float, max_w: float) -> str:
+    ell = "…"
+    if c.stringWidth(text, font, size) <= max_w:
+        return text
+    while text and c.stringWidth(text + ell, font, size) > max_w:
+        text = text[:-1]
+    return (text.rstrip(" .,;:") + ell) if text else ell
+
+
+def _wrap_lines(
+    c: canvas.Canvas, text: str, font: str, size: float, max_w: float, max_lines: int
+) -> List[str]:
     text = (text or "").strip()
-    if not text:
+    if not text or max_lines <= 0:
         return []
     words = text.split()
     lines: List[str] = []
@@ -105,34 +115,32 @@ def _wrap_lines(c: canvas.Canvas, text: str, font: str, size: float, max_w: floa
         trial = (current + " " + word).strip()
         if c.stringWidth(trial, font, size) <= max_w:
             current = trial
-        else:
-            if current:
-                lines.append(current)
-            current = word
+            continue
+        if current:
+            lines.append(current)
+            current = ""
             if len(lines) >= max_lines:
-                break
+                # Remaining content → ellipsis on last line
+                lines[-1] = _ellipsis_fit(c, lines[-1], font, size, max_w)
+                return lines
+        # Single word wider than column
+        if c.stringWidth(word, font, size) > max_w:
+            lines.append(_ellipsis_fit(c, word, font, size, max_w))
+            current = ""
+            if len(lines) >= max_lines:
+                return lines
+        else:
+            current = word
     if current and len(lines) < max_lines:
         lines.append(current)
-    if not lines:
-        return []
-    # Ellipsis if truncated
-    joined_len = sum(len(w) for w in words)
-    used_len = sum(len(ln.replace(" ", "")) for ln in lines)
-    if used_len < joined_len or len(words) > 0 and " ".join(lines) != text:
-        # More precise: if original not fully consumed
-        consumed = " ".join(lines)
-        if consumed != text and len(lines) == max_lines:
-            last = lines[-1]
-            ell = "…"
-            while last and c.stringWidth(last + ell, font, size) > max_w:
-                last = last[:-1]
-            lines[-1] = (last.rstrip(" .,;:") + ell) if last else ell
+    elif current and lines:
+        lines[-1] = _ellipsis_fit(c, lines[-1], font, size, max_w)
     return lines
 
 
 def _product_image_reader(product: dict) -> Optional[ImageReader]:
     product_id = product.get("id") or ""
-    getter = _GetImage
+    getter = _GetImage.get()
     if not getter or not product_id:
         return None
     try:
@@ -223,7 +231,6 @@ def _cover(c: canvas.Canvas, page_w, page_h, lang: str, formed_at: datetime) -> 
     c.setFillColor(_hex(config.MILKY))
     c.rect(0, 0, page_w, page_h, fill=1, stroke=0)
 
-    # Decorative gold line
     c.setStrokeColor(_hex(config.GOLD))
     c.setLineWidth(1.2)
     mid_y = page_h * 0.52
@@ -300,13 +307,14 @@ def _draw_card(
 ) -> None:
     s = _t(lang)
     pad = 8
-    # Card frame
+    price_h = 18
+
     c.setFillColor(_hex(config.WHITE))
     c.setStrokeColor(Color(34 / 255, 34 / 255, 34 / 255, alpha=0.18))
     c.setLineWidth(0.7)
     c.roundRect(x, y, w, h, 8, fill=1, stroke=1)
 
-    img_h = h * 0.52
+    img_h = h * 0.48
     img_x, img_y = x + pad, y + h - pad - img_h
     img_w = w - 2 * pad
 
@@ -318,31 +326,41 @@ def _draw_card(
         _draw_placeholder(c, img_x, img_y, img_w, img_h, name)
 
     text_top = img_y - 10
+    text_bottom = y + pad + price_h
     text_w = w - 2 * pad
+
     name = (product.get("name") or "").strip() or "—"
     name_lines = _wrap_lines(c, name, FONT_BODY_BOLD, 9.5, text_w, 2)
     c.setFillColor(_hex(config.GRAPHITE))
     c.setFont(FONT_BODY_BOLD, 9.5)
     ty = text_top
     for line in name_lines:
+        if ty < text_bottom + 10:
+            break
         c.drawString(x + pad, ty, line)
         ty -= 12
 
     desc = (product.get("description") or "").strip()
     if desc:
-        desc_lines = _wrap_lines(c, desc, FONT_BODY, 7.5, text_w, 4)
-        c.setFillColor(_hex(config.GRAY))
-        c.setFont(FONT_BODY, 7.5)
-        ty -= 2
-        for line in desc_lines:
-            c.drawString(x + pad, ty, line)
-            ty -= 9.5
+        # How many desc lines fit above the price
+        avail = ty - text_bottom - 4
+        max_desc = max(0, min(4, int(avail // 9.5)))
+        if max_desc:
+            desc_lines = _wrap_lines(c, desc, FONT_BODY, 7.5, text_w, max_desc)
+            c.setFillColor(_hex(config.GRAY))
+            c.setFont(FONT_BODY, 7.5)
+            ty -= 2
+            for line in desc_lines:
+                if ty < text_bottom + 8:
+                    break
+                c.drawString(x + pad, ty, line)
+                ty -= 9.5
 
     price = format_money(product.get("price"), product.get("currency") or "kzt")
     price_label = price if price else s["on_request"]
     c.setFillColor(_hex(config.GOLD))
     c.setFont(FONT_BODY_BOLD, 11 if price else 8.5)
-    c.drawString(x + pad, y + pad + 4, price_label)
+    c.drawString(x + pad, y + pad + 4, _ellipsis_fit(c, price_label, FONT_BODY_BOLD, 11 if price else 8.5, text_w))
 
 
 def _paginated_grids(
@@ -364,6 +382,8 @@ def _paginated_grids(
     products = [p for p in items if (p.get("kind") or "product").lower() == "product"]
     services = [p for p in items if (p.get("kind") or "product").lower() == "service"]
     for group, key in ((products, "products"), (services, "services")):
+        if not group:
+            continue
         for i in range(0, len(group), config.CARDS_PER_PAGE):
             pages.append((key, list(group[i : i + config.CARDS_PER_PAGE])))
     return pages
@@ -380,60 +400,61 @@ def build_catalog_pdf(
 
     get_image: callable(product_id) -> (bytes, mime) | None
     """
-    global _GetImage
-    _GetImage = get_image
     ensure_fonts()
     lang = lang if lang in STRINGS else "ru"
     formed_at = datetime.now()
+    token = _GetImage.set(get_image)
 
-    buf = io.BytesIO()
-    page_w, page_h = A4
-    c = canvas.Canvas(buf, pagesize=A4)
-    c.setTitle(f"{_t(lang)['catalog']} — {config.BRAND_NAME}")
-    c.setAuthor(config.BRAND_NAME)
+    try:
+        buf = io.BytesIO()
+        page_w, page_h = A4
+        c = canvas.Canvas(buf, pagesize=A4)
+        c.setTitle(f"{_t(lang)['catalog']} — {config.BRAND_NAME}")
+        c.setAuthor(config.BRAND_NAME)
 
-    _cover(c, page_w, page_h, lang, formed_at)
+        _cover(c, page_w, page_h, lang, formed_at)
 
-    items = list(products)
-    if not items:
-        c.showPage()
-        c.setFillColor(_hex(config.MILKY))
-        c.rect(0, 0, page_w, page_h, fill=1, stroke=0)
-        c.setFillColor(_hex(config.GRAPHITE))
-        c.setFont(FONT_DISPLAY, 22)
-        c.drawCentredString(page_w / 2, page_h / 2, _t(lang)["empty"])
-        _footer(c, page_w, page_h, 1, 1, lang)
+        items = list(products)
+        if not items:
+            c.showPage()
+            c.setFillColor(_hex(config.MILKY))
+            c.rect(0, 0, page_w, page_h, fill=1, stroke=0)
+            c.setFillColor(_hex(config.GRAPHITE))
+            c.setFont(FONT_DISPLAY, 22)
+            c.drawCentredString(page_w / 2, page_h / 2, _t(lang)["empty"])
+            _footer(c, page_w, page_h, 1, 1, lang)
+            c.save()
+            return buf.getvalue()
+
+        grids = _paginated_grids(items)
+        content_pages = len(grids)
+        for page_idx, (section_key, chunk) in enumerate(grids):
+            c.showPage()
+            c.setFillColor(_hex(config.WHITE))
+            c.rect(0, 0, page_w, page_h, fill=1, stroke=0)
+
+            margin = config.PAGE_MARGIN
+            footer_space = 28
+            top = page_h - margin
+            if section_key:
+                top = _section_banner(c, _t(lang)[section_key], page_w, top)
+
+            gap_x, gap_y = 12, 12
+            usable_w = page_w - 2 * margin
+            usable_h = top - margin - footer_space
+            card_w = (usable_w - gap_x) / config.COLS
+            card_h = (usable_h - gap_y * (config.ROWS - 1)) / config.ROWS
+
+            for i, product in enumerate(chunk):
+                col = i % config.COLS
+                row = i // config.COLS
+                px = margin + col * (card_w + gap_x)
+                py = top - (row + 1) * card_h - row * gap_y
+                _draw_card(c, product, px, py, card_w, card_h, lang)
+
+            _footer(c, page_w, page_h, page_idx + 1, content_pages, lang)
+
         c.save()
         return buf.getvalue()
-
-    grids = _paginated_grids(items)
-    content_pages = len(grids)
-    # Cover is page 0 visually; footer page numbers are for content pages only.
-    for page_idx, (section_key, chunk) in enumerate(grids):
-        c.showPage()
-        c.setFillColor(_hex(config.WHITE))
-        c.rect(0, 0, page_w, page_h, fill=1, stroke=0)
-
-        margin = config.PAGE_MARGIN
-        footer_space = 28
-        top = page_h - margin
-        if section_key:
-            top = _section_banner(c, _t(lang)[section_key], page_w, top)
-
-        gap_x, gap_y = 12, 12
-        usable_w = page_w - 2 * margin
-        usable_h = top - margin - footer_space
-        card_w = (usable_w - gap_x) / config.COLS
-        card_h = (usable_h - gap_y * (config.ROWS - 1)) / config.ROWS
-
-        for i, product in enumerate(chunk):
-            col = i % config.COLS
-            row = i // config.COLS
-            x = margin + col * (card_w + gap_x)
-            y = top - (row + 1) * card_h - row * gap_y
-            _draw_card(c, product, x, y, card_w, card_h, lang)
-
-        _footer(c, page_w, page_h, page_idx + 1, content_pages, lang)
-
-    c.save()
-    return buf.getvalue()
+    finally:
+        _GetImage.reset(token)

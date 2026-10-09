@@ -1704,7 +1704,9 @@ class Handler(BaseHTTPRequestHandler):
                 products, lang=lang, get_image=get_product_image_bytes
             )
         except Exception as error:
-            print("[pdf-catalog] %s" % error)
+            import traceback
+
+            print("[pdf-catalog] %s\n%s" % (error, traceback.format_exc()))
             self.send_json({"error": "Не удалось сформировать PDF"}, 500)
             return
         stamp = time.strftime("%d%m%Y")

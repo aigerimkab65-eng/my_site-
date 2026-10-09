@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
@@ -15,6 +17,7 @@ FONT_DISPLAY = "AKDisplay"
 
 _KZ_PROBE = "әғқңөұүһіӘҒҚҢӨҰҮҺІ"
 _registered = False
+_LOCK = threading.Lock()
 
 
 def _font_has_chars(path, chars: str) -> bool:
@@ -34,6 +37,9 @@ def _font_has_chars(path, chars: str) -> bool:
 def _register(name: str, path) -> bool:
     if not path.is_file() or path.stat().st_size < 1000:
         return False
+    # Already registered (e.g. after a partial race before the lock was added).
+    if name in pdfmetrics.getRegisteredFontNames():
+        return True
     pdfmetrics.registerFont(TTFont(name, str(path)))
     return True
 
@@ -43,39 +49,42 @@ def ensure_fonts() -> None:
     global _registered
     if _registered:
         return
+    with _LOCK:
+        if _registered:
+            return
 
-    mont_r = FONTS_DIR / "Montserrat-Regular.ttf"
-    mont_m = FONTS_DIR / "Montserrat-Medium.ttf"
-    mont_b = FONTS_DIR / "Montserrat-Bold.ttf"
-    display = FONTS_DIR / "CormorantGaramond-Bold.ttf"
-    noto_r = FONTS_DIR / "NotoSans-Regular.ttf"
-    noto_b = FONTS_DIR / "NotoSans-Bold.ttf"
-    noto_serif = FONTS_DIR / "NotoSerif-Bold.ttf"
+        mont_r = FONTS_DIR / "Montserrat-Regular.ttf"
+        mont_m = FONTS_DIR / "Montserrat-Medium.ttf"
+        mont_b = FONTS_DIR / "Montserrat-Bold.ttf"
+        display = FONTS_DIR / "CormorantGaramond-Bold.ttf"
+        noto_r = FONTS_DIR / "NotoSans-Regular.ttf"
+        noto_b = FONTS_DIR / "NotoSans-Bold.ttf"
+        noto_serif = FONTS_DIR / "NotoSerif-Bold.ttf"
 
-    use_noto_body = not (
-        mont_r.is_file() and _font_has_chars(mont_r, _KZ_PROBE)
-    )
-    use_noto_display = not (
-        display.is_file() and _font_has_chars(display, _KZ_PROBE)
-    )
+        use_noto_body = not (
+            mont_r.is_file() and _font_has_chars(mont_r, _KZ_PROBE)
+        )
+        use_noto_display = not (
+            display.is_file() and _font_has_chars(display, _KZ_PROBE)
+        )
 
-    if use_noto_body:
-        if not _register(FONT_BODY, noto_r):
-            raise RuntimeError("PDF fonts missing: NotoSans-Regular.ttf")
-        _register(FONT_BODY_MED, noto_b) or _register(FONT_BODY_MED, noto_r)
-        _register(FONT_BODY_BOLD, noto_b) or _register(FONT_BODY_BOLD, noto_r)
-    else:
-        if not _register(FONT_BODY, mont_r):
-            raise RuntimeError("PDF fonts missing: Montserrat-Regular.ttf")
-        _register(FONT_BODY_MED, mont_m) or _register(FONT_BODY_MED, mont_r)
-        _register(FONT_BODY_BOLD, mont_b) or _register(FONT_BODY_BOLD, mont_r)
+        if use_noto_body:
+            if not _register(FONT_BODY, noto_r):
+                raise RuntimeError("PDF fonts missing: NotoSans-Regular.ttf")
+            _register(FONT_BODY_MED, noto_b) or _register(FONT_BODY_MED, noto_r)
+            _register(FONT_BODY_BOLD, noto_b) or _register(FONT_BODY_BOLD, noto_r)
+        else:
+            if not _register(FONT_BODY, mont_r):
+                raise RuntimeError("PDF fonts missing: Montserrat-Regular.ttf")
+            _register(FONT_BODY_MED, mont_m) or _register(FONT_BODY_MED, mont_r)
+            _register(FONT_BODY_BOLD, mont_b) or _register(FONT_BODY_BOLD, mont_r)
 
-    if use_noto_display:
-        if not _register(FONT_DISPLAY, noto_serif):
-            if not _register(FONT_DISPLAY, noto_b):
-                raise RuntimeError("PDF fonts missing: NotoSerif-Bold.ttf")
-    else:
-        if not _register(FONT_DISPLAY, display):
-            raise RuntimeError("PDF fonts missing: CormorantGaramond-Bold.ttf")
+        if use_noto_display:
+            if not _register(FONT_DISPLAY, noto_serif):
+                if not _register(FONT_DISPLAY, noto_b):
+                    raise RuntimeError("PDF fonts missing: NotoSerif-Bold.ttf")
+        else:
+            if not _register(FONT_DISPLAY, display):
+                raise RuntimeError("PDF fonts missing: CormorantGaramond-Bold.ttf")
 
-    _registered = True
+        _registered = True
