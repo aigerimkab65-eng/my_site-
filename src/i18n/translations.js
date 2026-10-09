@@ -767,4 +767,6 @@ export const ERROR_KEYS = {
     "Укажите имя": "error.needClientName",
     "Укажите номер телефона": "error.needClientPhone",
     "Слишком много запросов. Подождите немного.": "error.tooManyRequests",
+    "Не удалось сформировать PDF": "admin.pdfError",
+    "Не удалось скачать файл": "admin.pdfError",
   };
