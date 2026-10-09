@@ -744,6 +744,20 @@ def list_orders(status=None, limit=200):
     return [order_row_to_dict(row) for row in rows]
 
 
+def get_order(order_id):
+    order_id = clean_text(order_id, 64)
+    if not order_id:
+        return None
+    conn = db_connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM orders WHERE id = ?", (order_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return order_row_to_dict(row) if row else None
+
+
 def order_stats():
     conn = db_connect()
     try:
@@ -1394,6 +1408,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json({"orders": orders, "stats": stats})
             return
+        # GET /api/orders/<id>/invoice.pdf
+        if path.startswith("/api/orders/") and path.endswith("/invoice.pdf"):
+            order_id = path[len("/api/orders/") : -len("/invoice.pdf")]
+            self.serve_invoice_pdf(order_id, query)
+            return
         if path == "/api/clients":
             if not self.require_auth():
                 return
@@ -1711,6 +1730,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         stamp = time.strftime("%d%m%Y")
         self.send_pdf(pdf_bytes, "Catalog_%s.pdf" % stamp)
+
+    def serve_invoice_pdf(self, order_id, query):
+        if not self.require_auth():
+            return
+        order = get_order(order_id)
+        if order is None:
+            self.send_json({"error": "Заказ не найден"}, 404)
+            return
+        lang = (query.get("lang") or [order.get("lang") or "ru"])[0]
+        lang = str(lang or "ru").strip().lower()
+        if lang not in {"ru", "kz", "en"}:
+            lang = "ru"
+        try:
+            from pdf_export import build_invoice_pdf, invoice_number
+
+            pdf_bytes = build_invoice_pdf(order, lang=lang)
+            number = invoice_number(order.get("id") or "")
+        except Exception as error:
+            import traceback
+
+            print("[pdf-invoice] %s\n%s" % (error, traceback.format_exc()))
+            self.send_json({"error": "Не удалось сформировать PDF"}, 500)
+            return
+        self.send_pdf(pdf_bytes, "Schet-faktura_%s.pdf" % number)
 
     def create_product(self):
         if not self.require_auth():

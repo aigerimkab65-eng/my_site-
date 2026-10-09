@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../../i18n/I18nContext.jsx";
 import { useModalA11y } from "../../hooks/useModalA11y.js";
 import { adminApi } from "../../lib/adminApi.js";
+import { downloadFile } from "../../lib/downloadFile.js";
 import {
   formatDate,
   formatPrice,
@@ -18,6 +19,8 @@ export default function OrderModal({ order, onClose, onSaved, onDeleted }) {
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [invoiceLang, setInvoiceLang] = useState("ru");
+  const [downloadingInvoice, setDownloadingInvoice] = useState(false);
   const statusRef = useRef(null);
   const cardRef = useRef(null);
 
@@ -29,6 +32,10 @@ export default function OrderModal({ order, onClose, onSaved, onDeleted }) {
     setStatus(order.status || "new");
     setNotes(order.notes || "");
     setError("");
+    const orderLang = String(order.lang || "ru").toLowerCase();
+    setInvoiceLang(
+      orderLang === "kz" || orderLang === "en" ? orderLang : "ru"
+    );
   }, [order]);
 
   if (!open) {
@@ -100,6 +107,30 @@ export default function OrderModal({ order, onClose, onSaved, onDeleted }) {
   function handleWa(event) {
     event.preventDefault();
     openOrderWhatsApp(order, t);
+  }
+
+  async function handleInvoicePdf() {
+    if (!order?.id || downloadingInvoice) return;
+    setError("");
+    setDownloadingInvoice(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("lang", invoiceLang || "ru");
+      await downloadFile(
+        "/api/orders/" +
+          encodeURIComponent(order.id) +
+          "/invoice.pdf?" +
+          params.toString(),
+        {
+          fallbackName: "Schet-faktura.pdf",
+          localizeError,
+        }
+      );
+    } catch (err) {
+      setError(err.message || t("admin.invoicePdfError"));
+    } finally {
+      setDownloadingInvoice(false);
+    }
   }
 
   return (
@@ -231,6 +262,30 @@ export default function OrderModal({ order, onClose, onSaved, onDeleted }) {
             >
               {t("admin.openWa")}
             </a>
+            <label className="admin-invoice-lang">
+              <span className="visually-hidden">{t("admin.invoicePdfLang")}</span>
+              <select
+                value={invoiceLang}
+                onChange={(e) => setInvoiceLang(e.target.value)}
+                disabled={downloadingInvoice}
+                aria-label={t("admin.invoicePdfLang")}
+              >
+                <option value="ru">RU</option>
+                <option value="kz">KZ</option>
+                <option value="en">EN</option>
+              </select>
+            </label>
+            <button
+              className="btn-outline"
+              type="button"
+              id="order-invoice-pdf-btn"
+              disabled={downloadingInvoice}
+              onClick={handleInvoicePdf}
+            >
+              {downloadingInvoice
+                ? t("admin.invoicePdfLoading")
+                : t("admin.invoicePdfDownload")}
+            </button>
             <button
               className="text-link admin-delete"
               type="button"
