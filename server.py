@@ -1743,10 +1743,19 @@ class Handler(BaseHTTPRequestHandler):
         if lang not in {"ru", "kz", "en"}:
             lang = "ru"
         try:
-            from pdf_export import build_invoice_pdf, invoice_number
+            from pdf_export import SellerConfigError, build_invoice_pdf, invoice_number
 
             pdf_bytes = build_invoice_pdf(order, lang=lang)
             number = invoice_number(order.get("id") or "")
+        except SellerConfigError as error:
+            self.send_json(
+                {
+                    "error": str(error),
+                    "missing": list(error.missing),
+                },
+                400,
+            )
+            return
         except Exception as error:
             import traceback
 

@@ -62,7 +62,8 @@ def build_invoice_pdf(order: Dict[str, Any], lang: str = "ru") -> bytes:
     ensure_fonts()
     lang = lang if lang in {"ru", "kz", "en"} else "ru"
     s = t_invoice(lang)
-    seller = config.SELLER
+    # Raises SellerConfigError if required .env requisites are missing.
+    seller = config.get_seller(require_complete=True)
     vat_rate = float(seller.get("vat_rate") or 0)
     number = invoice_number(order.get("id") or "")
     order_date = format_order_date(order.get("createdAt"), lang)

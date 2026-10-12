@@ -22,6 +22,18 @@ _TMP = tempfile.TemporaryDirectory(prefix="ak-inv-")
 _DATA = Path(_TMP.name)
 os.environ["ADMIN_PASSWORD"] = "inv-test-pass"
 os.environ["ADMIN_SECRET"] = "inv-test-secret-0123456789ab"
+# Real-looking test requisites (not production placeholders used as silent defaults).
+os.environ["SELLER_NAME"] = "ИП Тестов Тест"
+os.environ["SELLER_BIN"] = "123456789012"
+os.environ["SELLER_ADDRESS"] = "г. Алматы, ул. Тестовая, д. 10"
+os.environ["SELLER_BANK"] = "АО «Народный Банк Казахстана»"
+os.environ["SELLER_IIK"] = "KZ86125KZT1001300300"
+os.environ["SELLER_BIK"] = "HSBKKZKX"
+os.environ["SELLER_KBE"] = "19"
+os.environ["SELLER_PHONE"] = "+7 700 000 00 00"
+os.environ["SELLER_TELEGRAM"] = "@test"
+os.environ["SELLER_DIRECTOR"] = "Тестов Т. Т."
+os.environ["SELLER_VAT_RATE"] = "0"
 
 import crm_store  # noqa: E402
 
@@ -223,9 +235,9 @@ def test_invoice_no_price_and_notes_and_kz():
 
 def test_invoice_vat_rates():
     order = _make_order(tag="vat", priceFrom=25000)
-    old = pdf_config.SELLER["vat_rate"]
+    old = os.environ.get("SELLER_VAT_RATE", "0")
     try:
-        pdf_config.SELLER["vat_rate"] = 0
+        os.environ["SELLER_VAT_RATE"] = "0"
         pdf0 = build_invoice_pdf(order, lang="ru")
         text0 = "\n".join(
             (p.extract_text() or "")
@@ -233,7 +245,7 @@ def test_invoice_vat_rates():
         )
         assert_true("Без НДС" in text0, "no vat label")
 
-        pdf_config.SELLER["vat_rate"] = 16
+        os.environ["SELLER_VAT_RATE"] = "16"
         pdf16 = build_invoice_pdf(order, lang="ru")
         text16 = "\n".join(
             (p.extract_text() or "")
@@ -242,11 +254,35 @@ def test_invoice_vat_rates():
         assert_true("16%" in text16, "vat rate")
         assert_true("3 448,28" in text16 or "3448,28" in text16 or "3 448.28" in text16, "vat amount")
     finally:
-        pdf_config.SELLER["vat_rate"] = old
+        os.environ["SELLER_VAT_RATE"] = old
         try:
             server.delete_order(order["id"])
         except Exception:
             pass
+
+
+
+def test_invoice_missing_seller_requisites():
+    order = {
+        "id": "missingreq01",
+        "createdAt": time.time(),
+        "serviceName": "Тест",
+        "clientName": "Клиент",
+        "clientPhone": "+77001112233",
+        "priceFrom": 1000,
+        "currency": "kzt",
+    }
+    saved_bin = os.environ.pop("SELLER_BIN", None)
+    try:
+        try:
+            build_invoice_pdf(order, lang="ru")
+            raise AssertionError("expected SellerConfigError")
+        except pdf_config.SellerConfigError as exc:
+            assert_true("SELLER_BIN" in str(exc), "mentions missing field")
+            assert_true("bin" in exc.missing, "missing list")
+    finally:
+        if saved_bin is not None:
+            os.environ["SELLER_BIN"] = saved_bin
 
 
 def main():
@@ -256,6 +292,7 @@ def main():
         ("invoice_http", test_invoice_http),
         ("invoice_no_price_notes_kz", test_invoice_no_price_and_notes_and_kz),
         ("invoice_vat_rates", test_invoice_vat_rates),
+        ("invoice_missing_seller", test_invoice_missing_seller_requisites),
     ]
     failed = []
     for name, fn in tests:
