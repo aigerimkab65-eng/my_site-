@@ -26,6 +26,7 @@ from ai.tools.catalog import (
     service_by_id,
 )
 from crm_store import (
+    ADMIN_SESSION_TTL_SEC,
     BACKUPS_DIR,
     DATA,
     DB_LOCK,
@@ -34,11 +35,16 @@ from crm_store import (
     ORDERS_DB,
     ROOT,
     UPLOADS,
+    create_admin_session,
     db_connect,
+    delete_admin_session,
+    delete_all_admin_sessions,
     ensure_order_columns,
+    get_admin_session,
     get_product_image_bytes,
     init_crm_db,
     load_admin_config_from_db,
+    prune_expired_admin_sessions,
     product_id_from_image_url,
     product_price_to_db,
     save_admin_config_to_db,
@@ -1009,15 +1015,8 @@ def delete_order(order_id):
             conn.close()
 
 
-SESSION_MAX_AGE = 60 * 60 * 24 * 365  # 1 year — stay logged in until logout
-
-
-def session_token(cfg):
-    return hmac.new(
-        cfg["secret"].encode(),
-        cfg["password"].encode(),
-        hashlib.sha256,
-    ).hexdigest()
+# Opaque server-side sessions (SQLite). Extended on each authenticated request.
+SESSION_MAX_AGE = ADMIN_SESSION_TTL_SEC  # 7 days
 
 
 def request_wants_secure_cookie(handler):
@@ -1374,10 +1373,13 @@ class Handler(BaseHTTPRequestHandler):
                 found[key] = value
         return found
 
-    def authed(self):
-        cfg = load_config()
+    def current_session(self, *, touch=True):
+        """Return valid admin session dict or None (extends TTL when touch=True)."""
         token = self.cookies().get("session", "")
-        return hmac.compare_digest(token, session_token(cfg))
+        return get_admin_session(token, touch=touch)
+
+    def authed(self):
+        return self.current_session(touch=True) is not None
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -1389,7 +1391,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(load_products())
             return
         if path == "/api/me":
-            self.send_json({"ok": self.authed()})
+            session = self.current_session(touch=True)
+            if session:
+                self.send_json(
+                    {"ok": True, "csrfToken": session["csrf_token"]}
+                )
+            else:
+                self.send_json({"ok": False})
             return
         if path == "/api/health":
             health = health_status()
@@ -1627,18 +1635,24 @@ class Handler(BaseHTTPRequestHandler):
         if not hmac.compare_digest(got, expected):
             self.send_json({"error": "Неверный пароль"}, 401)
             return
-        token = session_token(cfg)
+        session = create_admin_session(ttl_sec=SESSION_MAX_AGE)
+        payload = {"ok": True, "csrfToken": session["csrf_token"]}
         self.send_response(200)
-        body_out = json.dumps({"ok": True}).encode("utf-8")
+        body_out = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body_out)))
         secure = request_wants_secure_cookie(self)
-        self.send_header("Set-Cookie", session_cookie(token, secure=secure))
+        self.send_header(
+            "Set-Cookie",
+            session_cookie(session["token"], max_age=SESSION_MAX_AGE, secure=secure),
+        )
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body_out)
 
     def logout(self):
+        token = self.cookies().get("session", "")
+        delete_admin_session(token)
         self.send_response(200)
         body = b'{"ok": true}'
         secure = request_wants_secure_cookie(self)
@@ -1647,6 +1661,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header(
             "Set-Cookie", session_cookie("", max_age=0, secure=secure)
         )
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1795,6 +1810,7 @@ def main():
     init_crm_db()
     load_env()
     load_config()
+    prune_expired_admin_sessions()
     init_ai(create_order=create_order)
     if spa_index() is None:
         raise SystemExit(

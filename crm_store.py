@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import secrets
 import sqlite3
 import threading
 import time
@@ -568,6 +569,140 @@ def init_schema(conn):
         "CREATE INDEX IF NOT EXISTS idx_orders_dedupe "
         "ON orders(client_phone, service_id, source, created_at DESC)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_sessions (
+            token TEXT PRIMARY KEY,
+            csrf_token TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            last_seen_at REAL NOT NULL,
+            expires_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires "
+        "ON admin_sessions(expires_at)"
+    )
+
+
+# Admin session TTL (also used by server.py cookie Max-Age).
+ADMIN_SESSION_TTL_SEC = 7 * 24 * 60 * 60
+
+
+def create_admin_session(ttl_sec=ADMIN_SESSION_TTL_SEC):
+    """Create a random opaque session + CSRF token. Returns dict."""
+    token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(32)
+    now = time.time()
+    expires_at = now + float(ttl_sec)
+    with DB_WRITE_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO admin_sessions
+                    (token, csrf_token, created_at, last_seen_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (token, csrf_token, now, now, expires_at),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "token": token,
+        "csrf_token": csrf_token,
+        "created_at": now,
+        "last_seen_at": now,
+        "expires_at": expires_at,
+    }
+
+
+def get_admin_session(token, *, touch=True, ttl_sec=ADMIN_SESSION_TTL_SEC):
+    """Return session row dict if valid; optionally extend expiry on activity."""
+    token = (token or "").strip()
+    if not token:
+        return None
+    now = time.time()
+    with DB_WRITE_LOCK:
+        conn = db_connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM admin_sessions WHERE token = ?",
+                (token,),
+            ).fetchone()
+            if row is None:
+                return None
+            if float(row["expires_at"]) < now:
+                conn.execute(
+                    "DELETE FROM admin_sessions WHERE token = ?", (token,)
+                )
+                conn.commit()
+                return None
+            if touch:
+                expires_at = now + float(ttl_sec)
+                conn.execute(
+                    """
+                    UPDATE admin_sessions
+                    SET last_seen_at = ?, expires_at = ?
+                    WHERE token = ?
+                    """,
+                    (now, expires_at, token),
+                )
+                conn.commit()
+                return {
+                    "token": row["token"],
+                    "csrf_token": row["csrf_token"],
+                    "created_at": row["created_at"],
+                    "last_seen_at": now,
+                    "expires_at": expires_at,
+                }
+            return {
+                "token": row["token"],
+                "csrf_token": row["csrf_token"],
+                "created_at": row["created_at"],
+                "last_seen_at": row["last_seen_at"],
+                "expires_at": row["expires_at"],
+            }
+        finally:
+            conn.close()
+
+
+def delete_admin_session(token):
+    token = (token or "").strip()
+    if not token:
+        return
+    with DB_WRITE_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def delete_all_admin_sessions():
+    with DB_WRITE_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute("DELETE FROM admin_sessions")
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def prune_expired_admin_sessions():
+    now = time.time()
+    with DB_WRITE_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute(
+                "DELETE FROM admin_sessions WHERE expires_at < ?", (now,)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def init_crm_db():
