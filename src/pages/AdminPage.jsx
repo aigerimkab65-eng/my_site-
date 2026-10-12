@@ -2,12 +2,21 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import LangSwitch from "../components/LangSwitch.jsx";
 import { useI18n } from "../i18n/I18nContext.jsx";
-import { adminApi } from "../lib/adminApi.js";
+import {
+  AdminApiError,
+  adminApi,
+  clearCsrfToken,
+  setCsrfToken,
+} from "../lib/adminApi.js";
 import Login from "../components/admin/Login.jsx";
 import Orders from "../components/admin/Orders.jsx";
 import Clients from "../components/admin/Clients.jsx";
 import Products from "../components/admin/Products.jsx";
 import OrderModal from "../components/admin/OrderModal.jsx";
+
+function isAuthLost(error) {
+  return error instanceof AdminApiError && (error.status === 401 || error.status === 403);
+}
 
 export default function AdminPage() {
   const { t, localizeError } = useI18n();
@@ -16,11 +25,13 @@ export default function AdminPage() {
   const [tab, setTab] = useState("orders");
   const [orderFilter, setOrderFilter] = useState("");
   const [orders, setOrders] = useState([]);
-  const [orderStats, setOrderStats] = useState({});
+  const [orderStats, setOrderStats] = useState(null);
   const [clients, setClients] = useState([]);
   const [clientsTotal, setClientsTotal] = useState(0);
   const [products, setProducts] = useState([]);
   const [editingOrder, setEditingOrder] = useState(null);
+  const [panelLoading, setPanelLoading] = useState(false);
+  const [panelError, setPanelError] = useState("");
   const [refreshingOrders, setRefreshingOrders] = useState(false);
   const [refreshingClients, setRefreshingClients] = useState(false);
   const [refreshingProducts, setRefreshingProducts] = useState(false);
@@ -57,31 +68,87 @@ export default function AdminPage() {
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [orderModalOpen]);
 
+  const forceLogout = useCallback(() => {
+    clearCsrfToken();
+    setAuthed(false);
+    setEditingOrder(null);
+    setOrders([]);
+    setOrderStats(null);
+    setClients([]);
+    setClientsTotal(0);
+    setProducts([]);
+    setPanelError("");
+    setPanelLoading(false);
+  }, []);
+
+  const handleAuthError = useCallback(
+    (error, context) => {
+      console.error("[admin]", context, error);
+      if (isAuthLost(error)) {
+        forceLogout();
+        return true;
+      }
+      return false;
+    },
+    [forceLogout]
+  );
+
   const loadOrders = useCallback(
     async (filter = orderFilter) => {
       const query = filter ? "?status=" + encodeURIComponent(filter) : "";
       const data = await adminApi("/api/orders" + query, {}, localizeError);
-      setOrders(data.orders || []);
-      setOrderStats(data.stats || {});
+      if (!Array.isArray(data.orders)) {
+        throw new AdminApiError("Некорректный ответ сервера (orders)", {
+          status: 200,
+          data,
+        });
+      }
+      setOrders(data.orders);
+      setOrderStats(
+        data.stats && typeof data.stats === "object" ? data.stats : { total: 0, byStatus: {} }
+      );
     },
     [orderFilter, localizeError]
   );
 
   const loadClients = useCallback(async () => {
     const data = await adminApi("/api/clients", {}, localizeError);
-    const list = data.clients || [];
-    setClients(list);
-    setClientsTotal(data.total != null ? data.total : list.length);
+    if (!Array.isArray(data.clients)) {
+      throw new AdminApiError("Некорректный ответ сервера (clients)", {
+        status: 200,
+        data,
+      });
+    }
+    setClients(data.clients);
+    setClientsTotal(
+      typeof data.total === "number" ? data.total : data.clients.length
+    );
   }, [localizeError]);
 
   const loadProducts = useCallback(async () => {
     const data = await adminApi("/api/products", {}, localizeError);
-    setProducts(Array.isArray(data) ? data : []);
+    if (!Array.isArray(data)) {
+      throw new AdminApiError("Некорректный ответ сервера (products)", {
+        status: 200,
+        data,
+      });
+    }
+    setProducts(data);
   }, [localizeError]);
 
   const loadPanelData = useCallback(async () => {
-    await Promise.all([loadOrders(), loadClients(), loadProducts()]);
-  }, [loadOrders, loadClients, loadProducts]);
+    setPanelLoading(true);
+    setPanelError("");
+    try {
+      await Promise.all([loadOrders(), loadClients(), loadProducts()]);
+    } catch (error) {
+      if (handleAuthError(error, "loadPanelData")) return;
+      setPanelError(error.message || t("admin.loadError"));
+      throw error;
+    } finally {
+      setPanelLoading(false);
+    }
+  }, [loadOrders, loadClients, loadProducts, handleAuthError, t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,18 +157,24 @@ export default function AdminPage() {
         const me = await adminApi("/api/me", {}, localizeError);
         if (cancelled) return;
         if (me.ok) {
+          if (me.csrfToken) setCsrfToken(me.csrfToken);
           setAuthed(true);
           setTab("orders");
           setChecking(false);
           try {
             await loadPanelData();
-          } catch (_) {
-            // Panel stays open; lists can be refreshed manually.
+          } catch (error) {
+            // panelError already set inside loadPanelData (unless auth lost)
+            if (!isAuthLost(error)) {
+              console.error("[admin] initial panel load failed", error);
+            }
           }
           return;
         }
-      } catch (_) {
-        // not logged in
+        clearCsrfToken();
+      } catch (error) {
+        console.error("[admin] session check failed", error);
+        clearCsrfToken();
       } finally {
         if (!cancelled) setChecking(false);
       }
@@ -113,39 +186,63 @@ export default function AdminPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-render labels/lists when language changes (t identity changes with lang)
+  // Refresh active tab labels/lists when language changes
   useEffect(() => {
     if (!authed) return;
-    if (tab === "orders") loadOrders().catch(() => {});
-    else if (tab === "clients") loadClients().catch(() => {});
-    else if (tab === "products") loadProducts().catch(() => {});
+    let cancelled = false;
+    (async () => {
+      try {
+        if (tab === "orders") await loadOrders();
+        else if (tab === "clients") await loadClients();
+        else if (tab === "products") await loadProducts();
+        if (!cancelled) setPanelError("");
+      } catch (error) {
+        if (cancelled) return;
+        if (handleAuthError(error, "lang-refresh")) return;
+        setPanelError(error.message || t("admin.loadError"));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [t]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleLoginSuccess() {
     setAuthed(true);
     setTab("orders");
-    await loadPanelData();
+    setPanelError("");
+    try {
+      await loadPanelData();
+    } catch (error) {
+      if (!isAuthLost(error)) {
+        console.error("[admin] post-login load failed", error);
+      }
+    }
   }
 
   async function handleLogout() {
     setLoggingOut(true);
     try {
       await adminApi("/api/logout", { method: "POST" }, localizeError);
-    } catch (_) {
-      // Still leave the panel even if the request fails.
+    } catch (error) {
+      console.error("[admin] logout request failed", error);
     } finally {
-      setEditingOrder(null);
-      setAuthed(false);
+      forceLogout();
       setLoggingOut(false);
     }
   }
 
   async function handleFilterChange(status) {
     setOrderFilter(status);
+    setRefreshingOrders(true);
     try {
       await loadOrders(status);
+      setPanelError("");
     } catch (error) {
-      alert(error.message);
+      if (handleAuthError(error, "filterOrders")) return;
+      setPanelError(error.message);
+    } finally {
+      setRefreshingOrders(false);
     }
   }
 
@@ -153,8 +250,10 @@ export default function AdminPage() {
     setRefreshingOrders(true);
     try {
       await loadOrders();
+      setPanelError("");
     } catch (error) {
-      alert(error.message);
+      if (handleAuthError(error, "refreshOrders")) return;
+      setPanelError(error.message);
     } finally {
       setRefreshingOrders(false);
     }
@@ -164,8 +263,10 @@ export default function AdminPage() {
     setRefreshingClients(true);
     try {
       await loadClients();
+      setPanelError("");
     } catch (error) {
-      alert(error.message);
+      if (handleAuthError(error, "refreshClients")) return;
+      setPanelError(error.message);
     } finally {
       setRefreshingClients(false);
     }
@@ -175,15 +276,31 @@ export default function AdminPage() {
     setRefreshingProducts(true);
     try {
       await loadProducts();
+      setPanelError("");
     } catch (error) {
-      alert(error.message);
+      if (handleAuthError(error, "refreshProducts")) return;
+      setPanelError(error.message);
     } finally {
       setRefreshingProducts(false);
     }
   }
 
   async function handleOrdersChanged() {
-    await Promise.all([loadOrders(), loadClients()]);
+    try {
+      await Promise.all([loadOrders(), loadClients()]);
+      setPanelError("");
+    } catch (error) {
+      if (handleAuthError(error, "ordersChanged")) return;
+      setPanelError(error.message);
+    }
+  }
+
+  async function handleRetryPanel() {
+    try {
+      await loadPanelData();
+    } catch (_) {
+      // panelError set by loadPanelData
+    }
   }
 
   return (
@@ -213,13 +330,33 @@ export default function AdminPage() {
       <main className="admin-wrap">
         {checking ? (
           <section className="admin-card" aria-busy="true">
-            <h1>{t("admin.loginTitle")}</h1>
-            <p className="admin-note">{t("admin.loginNote")}</p>
+            <h1>{t("admin.checkingSession")}</h1>
+            <p className="admin-note">{t("admin.checkingSessionNote")}</p>
           </section>
         ) : !authed ? (
           <Login onSuccess={handleLoginSuccess} />
         ) : (
           <section id="panel">
+            {panelError ? (
+              <div className="admin-card admin-panel-error" role="alert">
+                <p className="admin-error">{panelError}</p>
+                <button
+                  className="btn-outline"
+                  type="button"
+                  onClick={handleRetryPanel}
+                  disabled={panelLoading}
+                >
+                  {t("admin.retry")}
+                </button>
+              </div>
+            ) : null}
+
+            {panelLoading && !panelError ? (
+              <p className="admin-note" aria-live="polite">
+                {t("admin.loadingPanel")}
+              </p>
+            ) : null}
+
             <div className="admin-tabs" role="tablist" aria-label="Admin sections">
               <button
                 className={`admin-tab${tab === "orders" ? " is-active" : ""}`}
@@ -271,7 +408,7 @@ export default function AdminPage() {
 
             <Orders
               orders={orders}
-              stats={orderStats}
+              stats={orderStats || {}}
               filter={orderFilter}
               onFilterChange={handleFilterChange}
               onRefresh={handleRefreshOrders}
@@ -285,7 +422,14 @@ export default function AdminPage() {
             <Clients
               clients={clients}
               onRefresh={handleRefreshClients}
-              onHidden={loadClients}
+              onHidden={async () => {
+                try {
+                  await loadClients();
+                } catch (error) {
+                  if (handleAuthError(error, "hideClient")) return;
+                  setPanelError(error.message);
+                }
+              }}
               refreshing={refreshingClients}
               hidden={tab !== "clients"}
             />

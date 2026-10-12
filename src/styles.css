@@ -1148,6 +1148,13 @@ a {
 }
 
 .admin-note,
+.admin-panel-error {
+  margin-bottom: 1rem;
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
+}
+
 .admin-error {
   margin: 0 0 18px;
   color: var(--gray);
