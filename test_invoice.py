@@ -48,7 +48,13 @@ _DATA.mkdir(parents=True, exist_ok=True)
 
 import server  # noqa: E402
 from pdf_export.invoice import build_invoice_pdf  # noqa: E402
-from pdf_export.money_words import amount_words_ru, split_vat_from_gross  # noqa: E402
+from pdf_export.money_words import (  # noqa: E402
+    amount_in_words,
+    amount_words_en,
+    amount_words_kz,
+    amount_words_ru,
+    split_vat_from_gross,
+)
 from pdf_export import config as pdf_config  # noqa: E402
 
 
@@ -130,6 +136,51 @@ def test_money_words():
     for amount, expected in cases.items():
         got = amount_words_ru(amount)
         assert_eq(got, expected, f"words({amount})")
+
+
+def test_currency_and_large_amounts():
+    assert_eq(amount_in_words(100, "ru", "usd"), "Сто долларов 00 центов")
+    assert_eq(amount_in_words(1, "ru", "usd"), "Один доллар 00 центов")
+    assert_eq(amount_in_words(2, "ru", "usd"), "Два доллара 00 центов")
+    assert_eq(amount_in_words(5, "ru", "rub"), "Пять рублей 00 копеек")
+    assert_eq(amount_in_words(1, "ru", "rub"), "Один рубль 00 копеек")
+    assert_eq(amount_in_words(1.01, "ru", "rub"), "Один рубль 01 копейка")
+    assert_eq(amount_words_ru(1_000_000_000), "Один миллиард тенге 00 тиын")
+    assert_eq(amount_words_en(1_000_000_000), "One billion tenge 00 tiyin")
+    assert_eq(amount_words_kz(1000), "Бір мың теңге 00 тиын")
+    for bad in (-1, float("nan"), float("inf")):
+        for fn in (amount_words_ru, amount_words_kz, amount_words_en):
+            try:
+                fn(bad)
+            except ValueError:
+                continue
+            raise AssertionError(f"{fn.__name__}({bad}) should raise ValueError")
+
+
+def test_long_service_stays_inside_page():
+    service = (
+        "Индивидуальный проект: генерация серии портретов в национальном стиле "
+        "с ретушью и цветокоррекцией для каталога"
+    )
+    order = {
+        "id": "abcdef1234567890",
+        "createdAt": 1760000000,
+        "serviceName": service,
+        "clientName": "А" * 80,
+        "clientPhone": "+77001112233",
+        "priceFrom": 999_999_999,
+        "currency": "usd",
+        "notes": "SECRET_NOTE_XYZ",
+        "message": "SECRET_MESSAGE_ABC",
+    }
+    pdf = build_invoice_pdf(order, lang="ru")
+    from pypdf import PdfReader
+
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(io.BytesIO(pdf)).pages)
+    assert_true("национальном стиле" in text, "long service kept")
+    assert_true("SECRET_NOTE_XYZ" not in text, "notes hidden")
+    assert_true("доллар" in text, "usd words")
+    assert_true("тенге" not in text, "usd must not say tenge")
 
 
 def test_vat_math():
@@ -253,13 +304,14 @@ def test_invoice_vat_rates():
         )
         assert_true("16%" in text16, "vat rate")
         assert_true("3 448,28" in text16 or "3448,28" in text16 or "3 448.28" in text16, "vat amount")
+        assert_true("21 551,72" in text16, "unit price excl VAT")
+        assert_true("Двадцать пять тысяч тенге" in text16, "amount due stays gross")
     finally:
         os.environ["SELLER_VAT_RATE"] = old
         try:
             server.delete_order(order["id"])
         except Exception:
             pass
-
 
 
 def test_invoice_missing_seller_requisites():
@@ -285,14 +337,43 @@ def test_invoice_missing_seller_requisites():
             os.environ["SELLER_BIN"] = saved_bin
 
 
+def test_invoice_missing_vat_rate_is_error():
+    """Empty SELLER_VAT_RATE must not silently become 0% / 12%."""
+    order = {
+        "id": "missingvat01",
+        "createdAt": time.time(),
+        "serviceName": "Тест",
+        "clientName": "Клиент",
+        "clientPhone": "+77001112233",
+        "priceFrom": 1000,
+        "currency": "kzt",
+    }
+    saved = os.environ.pop("SELLER_VAT_RATE", None)
+    try:
+        try:
+            build_invoice_pdf(order, lang="ru")
+            raise AssertionError("expected SellerConfigError for empty VAT")
+        except pdf_config.SellerConfigError as exc:
+            assert_true("vat_rate" in exc.missing, "vat_rate listed")
+            assert_true("SELLER_VAT_RATE" in str(exc), "message names env")
+    finally:
+        if saved is not None:
+            os.environ["SELLER_VAT_RATE"] = saved
+        else:
+            os.environ["SELLER_VAT_RATE"] = "0"
+
+
 def main():
     tests = [
         ("money_words", test_money_words),
+        ("currency_and_large", test_currency_and_large_amounts),
+        ("long_service_inside_page", test_long_service_stays_inside_page),
         ("vat_math", test_vat_math),
         ("invoice_http", test_invoice_http),
         ("invoice_no_price_notes_kz", test_invoice_no_price_and_notes_and_kz),
         ("invoice_vat_rates", test_invoice_vat_rates),
         ("invoice_missing_seller", test_invoice_missing_seller_requisites),
+        ("invoice_missing_vat", test_invoice_missing_vat_rate_is_error),
     ]
     failed = []
     for name, fn in tests:

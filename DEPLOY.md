@@ -6,21 +6,26 @@
 ## Быстрый чеклист
 
 1. Скопировать проект на сервер, создать `.env` из `.env.example`.
-2. Задать сильные `ADMIN_PASSWORD` и `ADMIN_SECRET` (уникальные, не из примера).
-3. `npm ci && npm run build` — собрать фронт в `dist/` (нужен Node 18+).
-4. `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
-   (ReportLab + Pillow для PDF-каталога; в `pdf_export/fonts/` уже лежат TTF).
-5. Перезапустить сервис после установки зависимостей, например:
+2. Задать `ADMIN_PASSWORD_HASH` (предпочтительно на проде) или `ADMIN_PASSWORD`. Без них сервер **не стартует**.
+3. Заполнить обязательные `SELLER_*` (включая явный `SELLER_VAT_RATE=0` для «Без НДС» или `16` для НДС). Пустой VAT → счёт не генерируется (400).
+4. Если сайт открывается и с `www`, и без — задать  
+   `ALLOWED_ORIGINS=https://example.com,https://www.example.com` (иначе CSRF 403 в админке).
+5. `npm ci && npm run build` — собрать фронт в `dist/` (нужен Node 18+).
+6. `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
+   (ReportLab + Pillow + bcrypt; в `pdf_export/fonts/` уже лежат TTF).
+7. Перезапустить сервис после установки зависимостей, например:
    `sudo systemctl restart aigerim-landing` (имя unit смотрите в своём systemd).
-6. `BIND_HOST=127.0.0.1` — сервер слушает только localhost; снаружи — **nginx/Caddy** с HTTPS.
-   Прокси должен передавать `X-Forwarded-Proto: https` — тогда session cookie ставится с `Secure`.
-   При необходимости: `SECURE_COOKIES=1` в `.env`.
-7. Systemd (или аналог) держит `server.py` постоянно запущенным.
-8. Мониторинг: `GET /api/health` → `{"ok":true,"db":"up",...}`.
-9. Бэкапы: `data/backups/crm-*.db` (авто при старте и каждые `CRM_BACKUP_INTERVAL_SEC`). Копировать на другой диск / облако.
-10. Хранилище: всё CRM в одном `data/crm.db` (orders, clients, products + фото BLOB, settings). Legacy `config.json` / `products.json` мигрируют при старте (`python3 scripts/migrate_to_sqlite.py`).
-11. После деплоя: `python3 test_crm_reliability.py`, `python3 test_pdf_catalog.py` и `npm run test:e2e` (опционально).
-12. PDF-каталог (админ): `GET /api/products/catalog.pdf?lang=ru|kz|en&ids=…` — только с session cookie.
+8. `BIND_HOST=127.0.0.1` — сервер слушает только localhost; снаружи — **nginx/Caddy** с HTTPS.
+   Прокси **обязан** передавать `X-Forwarded-Proto: https` — иначе Secure-cookie не выставится
+   (или задайте `SECURE_COOKIES=1`). Если Secure включён, а сайт открыт по `http://` — логин «не работает».
+   Также нужны `Host` / `X-Forwarded-Host`, `X-Real-IP` / `X-Forwarded-For`.
+9. **Не затирать `data/` при деплое.** В `data/crm.db` лежат заказы, товары **и admin-сессии**.
+   Новый деплой без этой папки = все вылогинены + пустая CRM.
+10. Systemd (или аналог) держит `server.py` постоянно запущенным.
+11. Мониторинг: `GET /api/health` → `{"ok":true,"db":"up",...}`.
+12. Бэкапы: `data/backups/crm-*.db` (авто при старте и каждые `CRM_BACKUP_INTERVAL_SEC`). Копировать на другой диск / облако.
+13. После деплоя руками: вход в `/admin` → сохранить любое изменение в заказе → скачать счёт-фактуру.
+14. Опционально: `python3 test_crm_reliability.py`, `python3 test_invoice.py`, `npm run test:e2e`.
 
 ## Локальная разработка фронта
 
@@ -71,15 +76,22 @@ server {
 | Проверка | Ожидание |
 |----------|----------|
 | `/` | Главная открывается |
-| `/admin` | Форма входа |
+| `/admin` | Форма входа → после логина видны заказы |
+| Сохранить статус/заметку заказа | 200, без CSRF 403 |
+| Счёт-фактура PDF | PDF; при пустых `SELLER_*` — 400 со списком полей |
 | `/api/health` | `ok: true` |
 | `/data/crm.db` | 404 |
 | Заявка с сайта | Заказ в админке, клиент по телефону |
 
-## Переменные CRM
+## Переменные CRM / auth / CSRF
 
 | Переменная | По умолчанию | Смысл |
 |------------|--------------|--------|
 | `CRM_BACKUP_ON_START` | `1` | Бэкап при запуске сервера |
 | `CRM_BACKUP_INTERVAL_SEC` | `21600` | Период бэкапа (6 ч) |
 | `CRM_BACKUP_KEEP` | `14` | Сколько файлов хранить |
+| `TRUSTED_PROXIES` | `127.0.0.1,::1` | Пиры для `X-Real-IP` / `X-Forwarded-For` |
+| `SECURE_COOKIES` | auto по `X-Forwarded-Proto` | `1` = всегда Secure; `0` = никогда |
+| `ALLOWED_ORIGINS` | (Host / X-Forwarded-Host) | Доп. Origin для CSRF (www + apex) |
+| `ADMIN_PASSWORD_HASH` | — | Предпочтительно на проде вместо plaintext |
+| `SELLER_VAT_RATE` | обязателен | `0` = Без НДС; пусто = ошибка счёта |

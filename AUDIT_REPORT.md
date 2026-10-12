@@ -574,11 +574,23 @@ aigerim-landing/
 
 ### Что сделать на проде вручную
 
-1. В `.env` задать **`ADMIN_PASSWORD`** (или `ADMIN_PASSWORD_HASH`) — без этого сервер не стартует.
-2. Заполнить обязательные **`SELLER_*`** (см. `.env.example`) перед выдачей счетов.
-3. `pip install -r requirements.txt` (добавлен **bcrypt**).
-4. **Перелогинить всех админов** — старые cookie больше не работают.
-5. Пересобрать фронт: `npm run build`.
+1. В `.env` задать **`ADMIN_PASSWORD_HASH`** (предпочтительно) или `ADMIN_PASSWORD` — без этого сервер не стартует.
+2. Заполнить обязательные **`SELLER_*`**, включая явный **`SELLER_VAT_RATE=0`** («Без НДС») или `16` — пустой VAT больше не допускается.
+3. При www + apex: **`ALLOWED_ORIGINS=https://domain,https://www.domain`**.
+4. HTTPS: nginx с **`X-Forwarded-Proto: https`** или `SECURE_COOKIES=1` (не открывать прод по http с Secure).
+5. **Сохранять `data/crm.db`** при деплое — там же таблица `admin_sessions`.
+6. `pip install -r requirements.txt` (bcrypt) + `npm run build`.
+7. **Перелогинить всех админов** после выкладки волны 1.
+8. Ручная проверка: вход → сохранить изменение → скачать счёт.
+
+### Pre-prod ответы (четыре проверки)
+
+| Вопрос | Ответ |
+|--------|--------|
+| `SELLER_VAT_RATE` не задан? | **Ошибка 400**, не тихий 0%/12%. Явный `0` → в счёте «Без НДС». |
+| Secure + HTTPS | Auto по `X-Forwarded-Proto`, либо `SECURE_COOKIES=1`. Без proto на HTTPS cookie не Secure; с Secure на http — логин «ломается». |
+| CSRF Origin | Host + X-Forwarded-Host + `ALLOWED_ORIGINS` (www/apex). |
+| Где сессии? | Таблица `admin_sessions` внутри **`data/crm.db`** (переживает рестарт, если `data/` не затирают). |
 
 ---
 

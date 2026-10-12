@@ -51,6 +51,8 @@ SELLER_REQUIRED = (
     "iik",
     "bik",
     "kbe",
+    # vat_rate must be set explicitly (0 = Без НДС). Empty env is an error, not a silent default.
+    "vat_rate",
 )
 
 SELLER_FIELD_LABELS = {
@@ -111,21 +113,32 @@ def get_seller(*, require_complete=True):
         raw = os.environ.get(env_key, "")
         seller[field] = str(raw).strip() if raw is not None else ""
 
-    # vat_rate: optional, default 0 when empty
+    # vat_rate: required when generating invoices. Empty = missing (no silent 0%/12%).
+    # Explicit "0" means Без НДС and is written as such on the PDF.
     vat_raw = seller.get("vat_rate") or ""
-    if vat_raw == "":
-        seller["vat_rate"] = 0
-    else:
+    vat_parsed = None
+    if vat_raw != "":
         try:
-            seller["vat_rate"] = float(vat_raw)
+            vat_parsed = float(vat_raw)
+            if vat_parsed < 0 or vat_parsed > 100 or not (vat_parsed == vat_parsed):
+                raise ValueError("out of range")
         except ValueError as exc:
-            raise SellerConfigError(["vat_rate"]) from exc
+            if require_complete:
+                raise SellerConfigError(["vat_rate"]) from exc
+            vat_parsed = None
 
     if require_complete:
-        missing = [key for key in SELLER_REQUIRED if not seller.get(key)]
+        missing = [
+            key
+            for key in SELLER_REQUIRED
+            if key != "vat_rate" and not seller.get(key)
+        ]
+        if vat_raw == "" or vat_parsed is None:
+            missing.append("vat_rate")
         if missing:
             raise SellerConfigError(missing)
 
+    seller["vat_rate"] = 0.0 if vat_parsed is None else vat_parsed
     return seller
 
 

@@ -1084,12 +1084,19 @@ SESSION_MAX_AGE = ADMIN_SESSION_TTL_SEC  # 7 days
 
 
 def request_wants_secure_cookie(handler):
-    """True behind HTTPS reverse proxy, or when SECURE_COOKIES=1."""
+    """
+    True behind HTTPS reverse proxy, or when SECURE_COOKIES=1.
+
+    Prod checklist: nginx/Caddy must send X-Forwarded-Proto: https, OR set
+    SECURE_COOKIES=1. If Secure is set but the site is opened over plain http,
+    the browser will not store the session cookie and admin login will look broken.
+    """
     flag = os.environ.get("SECURE_COOKIES", "").strip().lower()
     if flag in {"1", "true", "yes", "on"}:
         return True
     if flag in {"0", "false", "no", "off"}:
         return False
+    # Only trust forwarded proto from peers that can reach BIND_HOST (usually nginx on localhost).
     proto = handler.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
     return proto == "https"
 
@@ -1733,15 +1740,39 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error": "Нужно войти"}, 401)
         return False
 
-    def origin_allowed(self):
-        """Same-origin check for cookie-authenticated mutations (CSRF defense)."""
+    def allowed_origins(self):
+        """
+        Origins accepted for CSRF checks.
+        - Always include http(s)://Host and http(s)://X-Forwarded-Host (first hop).
+        - Plus ALLOWED_ORIGINS from .env (comma-separated), for www/apex aliases.
+        """
+        allowed = set()
+        raw = os.environ.get("ALLOWED_ORIGINS", "").strip()
+        if raw:
+            for part in raw.split(","):
+                origin = part.strip().rstrip("/")
+                if origin:
+                    allowed.add(origin)
+        hosts = []
         host = (self.headers.get("Host") or "").strip()
-        if not host:
+        if host:
+            hosts.append(host)
+        xf_host = (self.headers.get("X-Forwarded-Host") or "").split(",", 1)[0].strip()
+        if xf_host and xf_host not in hosts:
+            hosts.append(xf_host)
+        for h in hosts:
+            allowed.add(f"http://{h}")
+            allowed.add(f"https://{h}")
+        return {a.rstrip("/") for a in allowed}
+
+    def origin_allowed(self):
+        """Same-origin / allowlist check for cookie-authenticated mutations (CSRF)."""
+        allowed = self.allowed_origins()
+        if not allowed:
             return False
-        allowed = {f"http://{host}", f"https://{host}"}
         origin = (self.headers.get("Origin") or "").strip().rstrip("/")
         if origin:
-            return origin in {a.rstrip("/") for a in allowed}
+            return origin in allowed
         referer = (self.headers.get("Referer") or "").strip()
         if referer:
             return any(
