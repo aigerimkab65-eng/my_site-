@@ -167,8 +167,9 @@ def migrate_products_from_json(conn):
 
 
 def migrate_config_from_json(conn):
-    """Move data/config.json admin credentials into settings table."""
-    if get_setting(conn, "admin_password"):
+    """Move data/config.json into settings. Plain passwords are NOT stored —
+    only a note is printed; set ADMIN_PASSWORD in .env instead."""
+    if get_setting(conn, "admin_password_hash"):
         return False
     if not CONFIG_FILE.is_file():
         return False
@@ -178,19 +179,22 @@ def migrate_config_from_json(conn):
         print(f"[crm] skip config.json: {error}")
         return False
     password = str(cfg.get("password") or "").strip()
-    secret = str(cfg.get("secret") or "").strip()
-    if not password or not secret:
-        return False
-    set_setting(conn, "admin_password", password)
-    set_setting(conn, "admin_secret", secret)
     dest = CONFIG_FILE.with_suffix(".json.migrated")
     try:
         if dest.exists():
             dest.unlink()
         CONFIG_FILE.replace(dest)
-        print(f"[crm] config migrated → {dest.name}")
+        if password:
+            print(
+                f"[crm] config.json moved to {dest.name}; "
+                "set ADMIN_PASSWORD in .env (plaintext from config.json was not stored).",
+                flush=True,
+            )
+        else:
+            print(f"[crm] config migrated → {dest.name}")
     except OSError as error:
-        print(f"[crm] config in SQLite; rename failed: {error}")
+        print(f"[crm] config rename failed: {error}")
+        return False
     return True
 
 
@@ -720,28 +724,44 @@ def init_crm_db():
             conn.close()
 
 
-def load_admin_config_from_db():
-    """Return {password, secret} from settings, or None if unset."""
+def get_admin_password_hash_from_db():
+    """Return bcrypt hash string from settings, or None."""
     conn = db_connect()
     try:
-        password = get_setting(conn, "admin_password")
-        secret = get_setting(conn, "admin_secret")
+        value = get_setting(conn, "admin_password_hash")
     finally:
         conn.close()
-    if password and secret:
-        return {"password": password, "secret": secret}
-    return None
+    value = (value or "").strip()
+    return value or None
 
 
-def save_admin_config_to_db(password, secret):
+def set_admin_password_hash(password_hash):
+    """Persist bcrypt hash; drop legacy plaintext admin_password if present."""
+    password_hash = (password_hash or "").strip()
+    if not password_hash:
+        raise ValueError("password hash required")
     with DB_WRITE_LOCK:
         conn = db_connect()
         try:
-            set_setting(conn, "admin_password", password)
-            set_setting(conn, "admin_secret", secret)
+            set_setting(conn, "admin_password_hash", password_hash)
+            conn.execute("DELETE FROM settings WHERE key = ?", ("admin_password",))
             conn.commit()
         finally:
             conn.close()
+
+
+def load_admin_config_from_db():
+    """Back-compat: return {password_hash} if set, else None."""
+    password_hash = get_admin_password_hash_from_db()
+    if password_hash:
+        return {"password_hash": password_hash}
+    return None
+
+
+def save_admin_config_to_db(password_hash, secret=None):
+    """Persist password hash. `secret` ignored (legacy signature for tests)."""
+    _ = secret
+    set_admin_password_hash(password_hash)
 
 
 def get_product_image_bytes(product_id):

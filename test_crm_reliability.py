@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Проверки CRM: заказы, клиенты, доступ, статика. Запуск: python3 test_crm_reliability.py"""
+"""Проверки CRM: заказы, клиенты, доступ, статика. Запуск: python3 test_crm_reliability.py
+
+Все записи идут во временную SQLite-БД — боевой data/crm.db не трогается.
+"""
 
 import json
 import os
@@ -16,7 +19,33 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+_TMP = tempfile.TemporaryDirectory(prefix="ak-crm-")
+_DATA = Path(_TMP.name)
+os.environ.setdefault("ADMIN_PASSWORD", "test-pass")
+os.environ.setdefault("ADMIN_SECRET", "test-secret-0123456789abcdef")
+os.environ["CRM_BACKUP_ON_START"] = "0"
+
+import crm_store  # noqa: E402
+
+crm_store.DATA = _DATA
+crm_store.ORDERS_DB = _DATA / "crm.db"
+crm_store.BACKUPS_DIR = _DATA / "backups"
+crm_store.UPLOADS = _DATA / "uploads"
+crm_store.PRODUCTS_FILE = _DATA / "products.json"
+crm_store.PRODUCTS_MIGRATED = _DATA / "products.json.migrated"
+crm_store.CONFIG_FILE = _DATA / "config.json"
+_DATA.mkdir(parents=True, exist_ok=True)
+crm_store.BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+crm_store.UPLOADS.mkdir(parents=True, exist_ok=True)
+
 import server  # noqa: E402
+
+# Re-bind paths imported by value into server's namespace.
+server.DATA = crm_store.DATA
+server.ORDERS_DB = crm_store.ORDERS_DB
+server.BACKUPS_DIR = crm_store.BACKUPS_DIR
+server.UPLOADS = crm_store.UPLOADS
+server.init_orders_db()
 
 
 class TestFailure(Exception):
@@ -93,6 +122,46 @@ def test_create_order_requires_contacts():
     )
 
 
+def test_clean_order_price_rejects_non_finite():
+    assert_eq(server.clean_order_price(100), 100, "int price")
+    assert_eq(server.clean_order_price("12.5"), 12.5, "float price")
+    assert_eq(server.clean_order_price(None), None, "empty price")
+    assert_raises(ValueError, lambda: server.clean_order_price("nan"), "nan rejected")
+    assert_raises(ValueError, lambda: server.clean_order_price("NaN"), "NaN rejected")
+    assert_raises(ValueError, lambda: server.clean_order_price("inf"), "inf rejected")
+    assert_raises(ValueError, lambda: server.clean_order_price("-1"), "negative rejected")
+
+
+def test_client_ip_trusts_proxy_headers():
+    class FakeHandler:
+        def __init__(self, peer, headers):
+            self.client_address = (peer, 12345)
+            self.headers = headers
+
+    direct = FakeHandler("203.0.113.9", {"X-Real-IP": "198.51.100.1"})
+    assert_eq(
+        server.client_ip(direct),
+        "203.0.113.9",
+        "untrusted peer ignores spoofed X-Real-IP",
+    )
+
+    via_nginx = FakeHandler(
+        "127.0.0.1",
+        {"X-Real-IP": "198.51.100.44", "X-Forwarded-For": "1.2.3.4, 198.51.100.44"},
+    )
+    assert_eq(server.client_ip(via_nginx), "198.51.100.44", "X-Real-IP from localhost")
+
+    xff_only = FakeHandler(
+        "127.0.0.1",
+        {"X-Forwarded-For": "8.8.8.8, 203.0.113.50"},
+    )
+    assert_eq(
+        server.client_ip(xff_only),
+        "203.0.113.50",
+        "rightmost XFF hop when no X-Real-IP",
+    )
+
+
 def test_catalog_price_is_server_truth():
     forged = server.create_order(
         {
@@ -128,23 +197,39 @@ def test_catalog_price_is_server_truth():
     assert_true(legacy["serviceName"] != "Чат-консультант", "catalog name fills default")
     server.delete_order(legacy["id"])
 
+    # Non-catalog sources must not accept client-forged prices (invoice safety).
+    contact = server.create_order(
+        {
+            "source": "contact",
+            "serviceName": "Контакт WhatsApp",
+            "message": "hello",
+            "clientName": "Test User",
+            "clientPhone": "7001234890",
+            "priceFrom": 1,
+            "currency": "usd",
+            "lang": "ru",
+        }
+    )
+    assert_eq(contact["priceFrom"], None, "contact ignores client price")
+    assert_eq(contact["currency"], "kzt", "contact currency not forged")
+    server.delete_order(contact["id"])
+
+    custom = server.create_order(
+        {
+            "source": "custom",
+            "serviceName": "Индивидуальный проект",
+            "message": "custom brief",
+            "clientName": "Test User",
+            "clientPhone": "7001234891",
+            "priceFrom": 999,
+            "lang": "ru",
+        }
+    )
+    assert_eq(custom["priceFrom"], None, "custom ignores client price")
+    server.delete_order(custom["id"])
+
 
 def test_products_sqlite_roundtrip():
-    server.init_orders_db()
-    original = server.load_products()
-    # Preserve blobs from live catalog while rewriting rows for the probe.
-    original_full = []
-    with server.DB_LOCK:
-        conn = server.db_connect()
-        try:
-            for row in conn.execute("SELECT * FROM products").fetchall():
-                item = server.product_row_to_dict(row)
-                if row["image_blob"] is not None:
-                    item["_image_blob"] = bytes(row["image_blob"])
-                    item["_image_mime"] = row["image_mime"] or ""
-                original_full.append(item)
-        finally:
-            conn.close()
     probe_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
     probe = {
         "id": "testprod01",
@@ -157,65 +242,64 @@ def test_products_sqlite_roundtrip():
         "_image_blob": probe_bytes,
         "_image_mime": "image/png",
     }
-    try:
-        server.save_products([probe])
-        loaded = server.load_products()
-        assert_eq(len(loaded), 1, "products rewritten")
-        assert_eq(loaded[0]["id"], "testprod01", "product id kept")
-        assert_eq(loaded[0]["price"], 100, "product price")
+    server.save_products([probe])
+    loaded = server.load_products()
+    assert_eq(len(loaded), 1, "products rewritten")
+    assert_eq(loaded[0]["id"], "testprod01", "product id kept")
+    assert_eq(loaded[0]["price"], 100, "product price")
 
-        from crm_store import get_product_image_bytes, product_id_from_image_url
+    from crm_store import get_product_image_bytes, product_id_from_image_url
 
-        assert_eq(
-            product_id_from_image_url("/assets/products/testprod01.png"),
-            "testprod01",
-            "image url parse",
-        )
-        stored = get_product_image_bytes("testprod01")
-        assert_true(stored is not None, "image blob stored")
-        assert_eq(stored[0], probe_bytes, "image blob bytes")
-        assert_eq(stored[1], "image/png", "image mime")
+    assert_eq(
+        product_id_from_image_url("/assets/products/testprod01.png"),
+        "testprod01",
+        "image url parse",
+    )
+    stored = get_product_image_bytes("testprod01")
+    assert_true(stored is not None, "image blob stored")
+    assert_eq(stored[0], probe_bytes, "image blob bytes")
+    assert_eq(stored[1], "image/png", "image mime")
 
-        updated = dict(probe, name="Renamed", price="")
-        updated.pop("_image_blob", None)
-        updated.pop("_image_mime", None)
-        saved = server.update_product_record(updated)
-        assert_eq(saved["name"], "Renamed", "product update name")
-        assert_eq(saved["price"], "", "empty price = on request")
-        stored_after = get_product_image_bytes("testprod01")
-        assert_true(stored_after is not None, "blob kept after metadata update")
+    updated = dict(probe, name="Renamed", price="")
+    updated.pop("_image_blob", None)
+    updated.pop("_image_mime", None)
+    saved = server.update_product_record(updated)
+    assert_eq(saved["name"], "Renamed", "product update name")
+    assert_eq(saved["price"], "", "empty price = on request")
+    stored_after = get_product_image_bytes("testprod01")
+    assert_true(stored_after is not None, "blob kept after metadata update")
 
-        got = server.get_product("testprod01")
-        assert_eq(got["name"], "Renamed", "get_product")
+    got = server.get_product("testprod01")
+    assert_eq(got["name"], "Renamed", "get_product")
 
-        removed = server.delete_product("testprod01")
-        assert_eq(removed["id"], "testprod01", "delete returns row")
-        assert_true(server.get_product("testprod01") is None, "deleted")
-        assert_true(
-            get_product_image_bytes("testprod01") is None, "blob deleted with product"
-        )
-    finally:
-        server.save_products(original_full or original)
+    removed = server.delete_product("testprod01")
+    assert_eq(removed["id"], "testprod01", "delete returns row")
+    assert_true(server.get_product("testprod01") is None, "deleted")
+    assert_true(
+        get_product_image_bytes("testprod01") is None, "blob deleted with product"
+    )
 
 
 def test_settings_in_sqlite():
-    server.init_orders_db()
-    from crm_store import load_admin_config_from_db, save_admin_config_to_db
+    from crm_store import load_admin_config_from_db, set_admin_password_hash
 
-    before = load_admin_config_from_db()
-    save_admin_config_to_db("probe-pass", "probe-secret-0123456789abcdef")
+    probe_hash = server.hash_admin_password("probe-pass")
+    set_admin_password_hash(probe_hash)
     stored = load_admin_config_from_db()
-    assert_eq(stored["password"], "probe-pass", "settings password")
-    assert_eq(stored["secret"], "probe-secret-0123456789abcdef", "settings secret")
-    if before:
-        save_admin_config_to_db(before["password"], before["secret"])
+    assert_eq(stored["password_hash"], probe_hash, "settings password hash")
+    assert_true(
+        server.verify_admin_password("probe-pass", stored["password_hash"]),
+        "bcrypt verify",
+    )
+    # Restore hash matching ADMIN_PASSWORD for later HTTP checks.
+    server._ADMIN_PASSWORD_HASH = None
+    server.ensure_admin_credentials()
     health = server.health_status()
     assert_eq(health.get("storage"), "sqlite", "health storage")
     assert_true(health.get("settings", 0) >= 1, "health settings count")
 
 
 def test_order_idempotency_and_dedupe():
-    server.init_orders_db()
     key = "test-idem-" + server.secrets.token_hex(8)
     payload = {
         "source": "service",
@@ -234,15 +318,19 @@ def test_order_idempotency_and_dedupe():
     assert_eq(first["id"], second["id"], "same key → same order id")
 
     # Soft dedupe: different key, same phone+service within window → same order.
+    # Mutable fields refresh so CRM matches the new WhatsApp submit.
     third = server.create_order(
         {
             **payload,
             "idempotencyKey": "other-" + server.secrets.token_hex(8),
             "message": "retry without shared key",
+            "clientName": "Idem User Updated",
         }
     )
     assert_eq(first["id"], third["id"], "soft dedupe same phone+service")
     assert_true(not getattr(server._CREATE_ORDER_META, "created", True), "dedupe replay")
+    assert_eq(third["message"], "retry without shared key", "dedupe refreshes message")
+    assert_eq(third["clientName"], "Idem User Updated", "dedupe refreshes name")
 
     # Different phone → new order.
     other = server.create_order(
@@ -384,9 +472,10 @@ def test_health_and_backup():
 def run_http_checks():
     """Поднимает сервер на случайном порту и проверяет HTTP-доступ."""
     os.environ["ADMIN_PASSWORD"] = "test-pass"
-    os.environ["ADMIN_SECRET"] = "test-secret-" + server.secrets.token_hex(8)
+    os.environ.pop("ADMIN_PASSWORD_HASH", None)
     os.environ["CRM_BACKUP_ON_START"] = "0"
-    server.load_config()
+    server._ADMIN_PASSWORD_HASH = None
+    server.ensure_admin_credentials()
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     port = httpd.server_address[1]
@@ -471,6 +560,8 @@ def main():
         ("phone_normalization", test_phone_normalization),
         ("message_fallback", test_message_fallback),
         ("create_order_requires_contacts", test_create_order_requires_contacts),
+        ("clean_order_price_rejects_non_finite", test_clean_order_price_rejects_non_finite),
+        ("client_ip_trusts_proxy_headers", test_client_ip_trusts_proxy_headers),
         ("catalog_price_is_server_truth", test_catalog_price_is_server_truth),
         ("products_sqlite_roundtrip", test_products_sqlite_roundtrip),
         ("settings_in_sqlite", test_settings_in_sqlite),

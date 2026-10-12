@@ -25,6 +25,8 @@ from ai.tools.catalog import (
     normalize_service_id,
     service_by_id,
 )
+import bcrypt
+
 from crm_store import (
     ADMIN_SESSION_TTL_SEC,
     BACKUPS_DIR,
@@ -40,14 +42,14 @@ from crm_store import (
     delete_admin_session,
     delete_all_admin_sessions,
     ensure_order_columns,
+    get_admin_password_hash_from_db,
     get_admin_session,
     get_product_image_bytes,
     init_crm_db,
-    load_admin_config_from_db,
     prune_expired_admin_sessions,
     product_id_from_image_url,
     product_price_to_db,
-    save_admin_config_to_db,
+    set_admin_password_hash,
 )
 
 mimetypes.add_type("font/woff2", ".woff2")
@@ -92,28 +94,90 @@ def load_env():
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-def load_config():
-    """Admin credentials: .env wins, else SQLite settings (migrated from config.json)."""
-    load_env()
-    password = os.environ.get("ADMIN_PASSWORD", "").strip()
-    secret = os.environ.get("ADMIN_SECRET", "").strip()
-    if password and secret:
-        return {"password": password, "secret": secret}
-    stored = load_admin_config_from_db()
-    if stored:
-        return stored
-    # Fresh local install — random password stored only in SQLite.
-    cfg = {
-        "password": secrets.token_urlsafe(12),
-        "secret": secrets.token_hex(16),
-    }
-    save_admin_config_to_db(cfg["password"], cfg["secret"])
-    print(
-        "Created admin credentials in SQLite (settings). "
-        "Prefer setting ADMIN_PASSWORD / ADMIN_SECRET in .env.",
-        file=sys.stderr,
+# Cached bcrypt hash only — never keep the plaintext password in memory after boot.
+_ADMIN_PASSWORD_HASH = None
+
+
+def hash_admin_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode(
+        "ascii"
     )
-    return cfg
+
+
+def verify_admin_password(plain: str, password_hash: str) -> bool:
+    if not plain or not password_hash:
+        return False
+    try:
+        return bcrypt.checkpw(
+            plain.encode("utf-8"),
+            password_hash.encode("ascii"),
+        )
+    except (ValueError, TypeError):
+        return False
+
+
+def ensure_admin_credentials():
+    """
+    Require ADMIN_PASSWORD or ADMIN_PASSWORD_HASH in .env. Store only bcrypt hash
+    in SQLite. Never auto-generate credentials. Never log the password.
+    """
+    global _ADMIN_PASSWORD_HASH
+    load_env()
+    env_hash = os.environ.get("ADMIN_PASSWORD_HASH", "").strip()
+    env_pass = os.environ.get("ADMIN_PASSWORD", "").strip()
+    if not env_hash and not env_pass:
+        raise SystemExit(
+            "FATAL: set ADMIN_PASSWORD or ADMIN_PASSWORD_HASH in .env "
+            "(admin credentials are required; auto-generation was removed)."
+        )
+
+    db_hash = get_admin_password_hash_from_db()
+
+    if env_hash:
+        if not env_hash.startswith("$2"):
+            raise SystemExit(
+                "FATAL: ADMIN_PASSWORD_HASH must be a bcrypt hash "
+                "(starts with $2a$ / $2b$ / $2y$)."
+            )
+        if db_hash != env_hash:
+            set_admin_password_hash(env_hash)
+            if db_hash:
+                delete_all_admin_sessions()
+                print(
+                    "[auth] admin password hash updated from env; all sessions cleared.",
+                    file=sys.stderr,
+                )
+        _ADMIN_PASSWORD_HASH = env_hash
+        return {"password_hash": env_hash}
+
+    # ADMIN_PASSWORD provided (plaintext only for bootstrap / verify — not stored).
+    if db_hash and verify_admin_password(env_pass, db_hash):
+        _ADMIN_PASSWORD_HASH = db_hash
+        return {"password_hash": db_hash}
+
+    new_hash = hash_admin_password(env_pass)
+    set_admin_password_hash(new_hash)
+    if db_hash:
+        delete_all_admin_sessions()
+        print(
+            "[auth] admin password changed; all sessions cleared.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[auth] admin password hash stored in SQLite settings.",
+            file=sys.stderr,
+        )
+    _ADMIN_PASSWORD_HASH = new_hash
+    return {"password_hash": new_hash}
+
+
+def load_config():
+    """Return {password_hash}. Alias for ensure_admin_credentials (tests / login)."""
+    global _ADMIN_PASSWORD_HASH
+    if _ADMIN_PASSWORD_HASH:
+        return {"password_hash": _ADMIN_PASSWORD_HASH}
+    return ensure_admin_credentials()
 
 
 def product_row_to_dict(row):
@@ -1629,10 +1693,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self.read_json()
         cfg = load_config()
         password = str(body.get("password", ""))
-        # Hash before compare so unequal lengths never raise / leak timing.
-        expected = hashlib.sha256(str(cfg.get("password", "")).encode()).digest()
-        got = hashlib.sha256(password.encode()).digest()
-        if not hmac.compare_digest(got, expected):
+        if not verify_admin_password(password, cfg.get("password_hash") or ""):
             self.send_json({"error": "Неверный пароль"}, 401)
             return
         session = create_admin_session(ttl_sec=SESSION_MAX_AGE)
@@ -1809,7 +1870,7 @@ def main():
     UPLOADS.mkdir(parents=True, exist_ok=True)
     init_crm_db()
     load_env()
-    load_config()
+    ensure_admin_credentials()
     prune_expired_admin_sessions()
     init_ai(create_order=create_order)
     if spa_index() is None:
