@@ -589,8 +589,18 @@ aigerim-landing/
 |--------|--------|
 | `SELLER_VAT_RATE` не задан? | **Ошибка 400**, не тихий 0%/12%. Явный `0` → в счёте «Без НДС». |
 | Secure + HTTPS | Auto по `X-Forwarded-Proto`, либо `SECURE_COOKIES=1`. Без proto на HTTPS cookie не Secure; с Secure на http — логин «ломается». |
-| CSRF Origin | Host + X-Forwarded-Host + `ALLOWED_ORIGINS` (www/apex). |
+| CSRF Origin | Host + X-Forwarded-Host + `ALLOWED_ORIGINS` + Vite localhost:5173/4173. |
 | Где сессии? | Таблица `admin_sessions` внутри **`data/crm.db`** (переживает рестарт, если `data/` не затирают). |
+
+### Доп. hardening после повторной проверки (не 100% с первого раза)
+
+| Проблема | Исправление |
+|----------|-------------|
+| Server TTL скользил, browser `Max-Age` — нет | При auth-ответах снова выставляется `Set-Cookie` |
+| CSRF/Origin **403** выкидывал из админки как logout | Logout только на **401** |
+| Vite `changeOrigin` → Origin `:5173` ≠ Host `:8765` → 403 в `npm run dev` | Allowlist локальных Vite/preview origin |
+
+**Остаточные (осознанные) риски, не блокеры волны 1:** `ADMIN_PASSWORD` остаётся в `os.environ` процесса до рестарта (на проде лучше только hash); SameSite=Lax (не Strict); GET без CSRF — ожидаемо.
 
 ---
 

@@ -15,7 +15,8 @@ import Products from "../components/admin/Products.jsx";
 import OrderModal from "../components/admin/OrderModal.jsx";
 
 function isAuthLost(error) {
-  return error instanceof AdminApiError && (error.status === 401 || error.status === 403);
+  // Only 401 = session gone. CSRF/Origin 403 must NOT force logout (user is still logged in).
+  return error instanceof AdminApiError && error.status === 401;
 }
 
 export default function AdminPage() {

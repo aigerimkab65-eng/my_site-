@@ -1409,12 +1409,24 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("[%s] %s" % (self.log_date_time_string(), fmt % args))
 
+    def _maybe_slide_session_cookie(self):
+        """Re-emit session cookie so browser Max-Age tracks server-side sliding TTL."""
+        token = getattr(self, "_slide_session_token", None)
+        if not token:
+            return
+        secure = request_wants_secure_cookie(self)
+        self.send_header(
+            "Set-Cookie",
+            session_cookie(token, max_age=SESSION_MAX_AGE, secure=secure),
+        )
+
     def send_json(self, payload, status=200):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._maybe_slide_session_cookie()
         self.end_headers()
         self.wfile.write(body)
 
@@ -1447,7 +1459,11 @@ class Handler(BaseHTTPRequestHandler):
     def current_session(self, *, touch=True):
         """Return valid admin session dict or None (extends TTL when touch=True)."""
         token = self.cookies().get("session", "")
-        return get_admin_session(token, touch=touch)
+        session = get_admin_session(token, touch=touch)
+        # Mark cookie for refresh so browser Max-Age slides with server expiry.
+        if session and touch:
+            self._slide_session_token = session["token"]
+        return session
 
     def authed(self):
         return self.current_session(touch=True) is not None
@@ -1743,10 +1759,17 @@ class Handler(BaseHTTPRequestHandler):
     def allowed_origins(self):
         """
         Origins accepted for CSRF checks.
-        - Always include http(s)://Host and http(s)://X-Forwarded-Host (first hop).
-        - Plus ALLOWED_ORIGINS from .env (comma-separated), for www/apex aliases.
+        - http(s)://Host and http(s)://X-Forwarded-Host (first hop)
+        - ALLOWED_ORIGINS from .env (www/apex / CDN)
+        - Local Vite/preview origins (changeOrigin proxies Host to :8765 while
+          browser Origin stays :5173/:4173 — without these, admin saves 403 in npm run dev)
         """
-        allowed = set()
+        allowed = {
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:4173",
+            "http://127.0.0.1:4173",
+        }
         raw = os.environ.get("ALLOWED_ORIGINS", "").strip()
         if raw:
             for part in raw.split(","):
@@ -1856,6 +1879,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self._maybe_slide_session_cookie()
         self.end_headers()
         self.wfile.write(data)
 
