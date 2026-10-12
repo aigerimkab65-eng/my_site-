@@ -1548,6 +1548,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.login()
                 return
             if path == "/api/logout":
+                if self.require_csrf() is None:
+                    return
                 self.logout()
                 return
             if path == "/api/chat":
@@ -1596,14 +1598,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(order, 201 if created else 200)
 
     def update_order_request(self, order_id):
-        if not self.require_auth():
+        if self.require_csrf() is None:
             return
         body = self.read_json()
         order = update_order(order_id, body)
         self.send_json(order)
 
     def update_client_request(self, phone_key):
-        if not self.require_auth():
+        if self.require_csrf() is None:
             return
         body = self.read_json()
         client = update_client(phone_key, body)
@@ -1659,7 +1661,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         path = urlparse(self.path).path
         if path.startswith("/api/orders/"):
-            if not self.require_auth():
+            if self.require_csrf() is None:
                 return
             try:
                 delete_order(path.rsplit("/", 1)[-1])
@@ -1672,8 +1674,7 @@ class Handler(BaseHTTPRequestHandler):
         if not path.startswith("/api/products/"):
             self.send_json({"error": "Не найдено"}, 404)
             return
-        if not self.authed():
-            self.send_json({"error": "Нужно войти"}, 401)
+        if self.require_csrf() is None:
             return
         product_id = path.rsplit("/", 1)[-1]
         try:
@@ -1731,6 +1732,56 @@ class Handler(BaseHTTPRequestHandler):
             return True
         self.send_json({"error": "Нужно войти"}, 401)
         return False
+
+    def origin_allowed(self):
+        """Same-origin check for cookie-authenticated mutations (CSRF defense)."""
+        host = (self.headers.get("Host") or "").strip()
+        if not host:
+            return False
+        allowed = {f"http://{host}", f"https://{host}"}
+        origin = (self.headers.get("Origin") or "").strip().rstrip("/")
+        if origin:
+            return origin in {a.rstrip("/") for a in allowed}
+        referer = (self.headers.get("Referer") or "").strip()
+        if referer:
+            return any(
+                referer == a
+                or referer.startswith(a + "/")
+                or referer.startswith(a + "?")
+                for a in allowed
+            )
+        return False
+
+    def require_csrf(self):
+        """
+        Auth + CSRF token + Origin/Referer for state-changing admin requests.
+        Returns session dict on success, None after sending 401/403.
+        """
+        session = self.current_session(touch=True)
+        if session is None:
+            self.send_json({"error": "Нужно войти"}, 401)
+            return None
+        header = (
+            self.headers.get("X-CSRF-Token")
+            or self.headers.get("x-csrf-token")
+            or ""
+        ).strip()
+        expected = session.get("csrf_token") or ""
+        if not header or not expected or not hmac.compare_digest(header, expected):
+            self.send_json(
+                {
+                    "error": "Недействительный CSRF-токен. Обновите страницу и войдите снова."
+                },
+                403,
+            )
+            return None
+        if not self.origin_allowed():
+            self.send_json(
+                {"error": "Запрос отклонён: неверный Origin/Referer."},
+                403,
+            )
+            return None
+        return session
 
     def product_from_form(self, form, product_id, previous=None):
         name = clean_text(form.getfirst("name"), 120)
@@ -1841,7 +1892,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_pdf(pdf_bytes, "Schet-faktura_%s.pdf" % number)
 
     def create_product(self):
-        if not self.require_auth():
+        if self.require_csrf() is None:
             return
         form = self.read_form()
         product_id = secrets.token_hex(8)
@@ -1850,7 +1901,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(saved, 201)
 
     def update_product(self, product_id):
-        if not self.require_auth():
+        if self.require_csrf() is None:
             return
         form = self.read_form()
         previous = get_product(product_id)

@@ -518,6 +518,14 @@ def run_http_checks():
     cookie = headers.get("Set-Cookie") or ""
     assert_true("session=" in cookie, "session cookie")
     session = cookie.split("session=")[1].split(";")[0]
+    csrf = data.get("csrfToken") or ""
+    assert_true(csrf, "csrf token from login")
+    host = f"127.0.0.1:{port}"
+    admin_headers = {
+        "Cookie": f"session={session}",
+        "X-CSRF-Token": csrf,
+        "Origin": f"http://{host}",
+    }
 
     status, data, _ = req(
         "/api/orders",
@@ -547,7 +555,14 @@ def run_http_checks():
         method="DELETE",
         headers={"Cookie": f"session={session}"},
     )
-    assert_eq(status, 200, "DELETE order with auth")
+    assert_eq(status, 403, "DELETE without CSRF rejected")
+
+    status, _, _ = req(
+        f"/api/orders/{oid}",
+        method="DELETE",
+        headers=admin_headers,
+    )
+    assert_eq(status, 200, "DELETE order with CSRF")
 
     status, _, _ = req("/data/crm.db")
     assert_eq(status, 404, "crm.db not served")

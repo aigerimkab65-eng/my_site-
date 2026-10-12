@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useI18n } from "../../i18n/I18nContext.jsx";
-import { adminApi } from "../../lib/adminApi.js";
+import { adminApi, setCsrfToken } from "../../lib/adminApi.js";
 
 export default function Login({ onSuccess }) {
   const { t, localizeError } = useI18n();
@@ -14,7 +14,7 @@ export default function Login({ onSuccess }) {
     setError("");
     setSubmitting(true);
     try {
-      await adminApi(
+      const data = await adminApi(
         "/api/login",
         {
           method: "POST",
@@ -23,6 +23,7 @@ export default function Login({ onSuccess }) {
         },
         localizeError
       );
+      if (data?.csrfToken) setCsrfToken(data.csrfToken);
       setPassword("");
       onSuccess();
     } catch (err) {
