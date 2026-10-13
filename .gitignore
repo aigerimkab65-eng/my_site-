@@ -1,8 +1,11 @@
 .env
+.env.*
+!.env.example
 .venv/
 data/crm.db
 data/crm.db-*
 data/backups/
+data/uploads/
 data/config.json
 data/config.json.migrated
 data/products.json
@@ -15,6 +18,12 @@ dist/
 .tools/
 /test-results/
 /playwright-report/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 .DS_Store
 **/.DS_Store
