@@ -19,6 +19,7 @@ export default function OrderModal({ order, onClose, onSaved, onDeleted }) {
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [invoiceLang, setInvoiceLang] = useState("ru");
   const [downloadingInvoice, setDownloadingInvoice] = useState(false);
   const statusRef = useRef(null);
@@ -89,8 +90,10 @@ export default function OrderModal({ order, onClose, onSaved, onDeleted }) {
   }
 
   async function handleDelete() {
-    if (!order?.id) return;
+    if (!order?.id || deleting) return;
     if (!confirm(t("admin.confirmDeleteOrder"))) return;
+    setError("");
+    setDeleting(true);
     try {
       await adminApi(
         "/api/orders/" + order.id,
@@ -101,6 +104,8 @@ export default function OrderModal({ order, onClose, onSaved, onDeleted }) {
       await onDeleted();
     } catch (err) {
       setError(err.message);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -251,17 +256,27 @@ export default function OrderModal({ order, onClose, onSaved, onDeleted }) {
             >
               {t("admin.save")}
             </button>
-            <a
-              className="btn-solid"
-              id="order-open-wa"
-              href={clientWa || "#"}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-disabled={clientWa ? undefined : "true"}
-              onClick={handleWa}
-            >
-              {t("admin.openWa")}
-            </a>
+            {clientWa ? (
+              <a
+                className="btn-solid"
+                id="order-open-wa"
+                href={clientWa}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={handleWa}
+              >
+                {t("admin.openWa")}
+              </a>
+            ) : (
+              <button
+                className="btn-solid"
+                type="button"
+                id="order-open-wa"
+                disabled
+              >
+                {t("admin.openWa")}
+              </button>
+            )}
             <label className="admin-invoice-lang">
               <span className="visually-hidden">{t("admin.invoicePdfLang")}</span>
               <select
@@ -290,9 +305,10 @@ export default function OrderModal({ order, onClose, onSaved, onDeleted }) {
               className="text-link admin-delete"
               type="button"
               id="order-delete-btn"
+              disabled={deleting || saving}
               onClick={handleDelete}
             >
-              {t("admin.delete")}
+              {deleting ? t("admin.deleting") : t("admin.delete")}
             </button>
           </div>
         </form>

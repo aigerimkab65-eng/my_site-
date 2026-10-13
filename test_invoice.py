@@ -324,7 +324,9 @@ def test_invoice_missing_seller_requisites():
         "priceFrom": 1000,
         "currency": "kzt",
     }
-    saved_bin = os.environ.pop("SELLER_BIN", None)
+    # Empty string (not pop): pop would let .env setdefault refill the value.
+    saved_bin = os.environ.get("SELLER_BIN")
+    os.environ["SELLER_BIN"] = ""
     try:
         try:
             build_invoice_pdf(order, lang="ru")
@@ -335,6 +337,8 @@ def test_invoice_missing_seller_requisites():
     finally:
         if saved_bin is not None:
             os.environ["SELLER_BIN"] = saved_bin
+        else:
+            os.environ.pop("SELLER_BIN", None)
 
 
 def test_invoice_missing_vat_rate_is_error():
@@ -348,7 +352,9 @@ def test_invoice_missing_vat_rate_is_error():
         "priceFrom": 1000,
         "currency": "kzt",
     }
-    saved = os.environ.pop("SELLER_VAT_RATE", None)
+    # Empty string (not pop): pop would let .env setdefault refill VAT=0.
+    saved = os.environ.get("SELLER_VAT_RATE")
+    os.environ["SELLER_VAT_RATE"] = ""
     try:
         try:
             build_invoice_pdf(order, lang="ru")

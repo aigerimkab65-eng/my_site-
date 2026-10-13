@@ -481,7 +481,8 @@ def health_status():
     except Exception as error:
         payload["ok"] = False
         payload["db"] = "down"
-        payload["error"] = str(error)
+        # Do not leak paths / SQLite details to public health clients.
+        print(f"[health] database check failed: {error}", file=sys.stderr)
     return payload
 
 
