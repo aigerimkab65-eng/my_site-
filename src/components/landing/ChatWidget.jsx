@@ -8,6 +8,35 @@ const CHAT_WIDTH_MIN = 280;
 const CHAT_WIDTH_MAX = 560;
 const CHAT_MAX_FILES = 3;
 const CHAT_MAX_FILE_BYTES = 4 * 1024 * 1024;
+const CHAT_ACCEPT_FILES =
+  "image/jpeg,image/png,image/webp,image/gif,.pdf,.txt,.md,.csv,.json,.docx," +
+  "application/pdf,text/plain,text/markdown,text/csv,application/json," +
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const CHAT_ALLOWED_EXT = new Set([
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".gif",
+  ".pdf",
+  ".txt",
+  ".md",
+  ".csv",
+  ".json",
+  ".docx",
+]);
+const CHAT_ALLOWED_MIME = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "application/pdf",
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "application/json",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
 const CHAT_SUGGEST_KEYS = [
   "services.ai.photo.title",
   "services.ai.video.title",
@@ -50,6 +79,15 @@ function readFileAsDataUrl(file) {
     reader.onerror = () => reject(reader.error || new Error("read failed"));
     reader.readAsDataURL(file);
   });
+}
+
+function isAllowedChatFile(file) {
+  const mime = String(file?.type || "").toLowerCase();
+  if (mime && CHAT_ALLOWED_MIME.has(mime)) return true;
+  const name = String(file?.name || "").toLowerCase();
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return false;
+  return CHAT_ALLOWED_EXT.has(name.slice(dot));
 }
 
 function ChatBubbleContent({ text }) {
@@ -213,6 +251,11 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
   useEffect(() => {
     function onPageShow(event) {
       if (!event.persisted) return;
+      chatAbortRef.current?.abort();
+      chatAbortRef.current = null;
+      busyRef.current = false;
+      historyRef.current = [];
+      startedRef.current = false;
       setHistory([]);
       setStarted(false);
       setBusy(false);
@@ -354,6 +397,17 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
 
     const loaded = [];
     for (const file of files) {
+      if (!isAllowedChatFile(file)) {
+        setBubbles((prev) => [
+          ...prev,
+          {
+            id: String(Date.now()) + file.name,
+            role: "assistant",
+            text: t("chat.fileType") + ": " + file.name,
+          },
+        ]);
+        continue;
+      }
       if (file.size > CHAT_MAX_FILE_BYTES) {
         setBubbles((prev) => [
           ...prev,
@@ -471,12 +525,15 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
       const data = await response.json().catch(() => ({}));
       if (!mountedRef.current) return;
       if (!response.ok) {
+        let errorText = data.error || t("chat.error");
+        if (response.status === 429) errorText = data.error || t("chat.rateLimit");
+        else if (response.status === 503) errorText = data.error || t("chat.busy");
         setBubbles((prev) => [
           ...prev.filter((b) => b.id !== typingId),
           {
             id: "e-" + Date.now(),
             role: "assistant",
-            text: data.error || t("chat.error"),
+            text: errorText,
           },
         ]);
       } else {
@@ -706,8 +763,7 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
                       setAttachMenuOpen(false);
                       const input = fileRef.current;
                       if (!input) return;
-                      // Empty accept = any file type (pdf, video, archive, etc.)
-                      input.accept = "";
+                      input.accept = CHAT_ACCEPT_FILES;
                       input.click();
                     }}
                   >

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import io
+import math
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict
+from xml.sax.saxutils import escape
 
 from reportlab.lib.colors import HexColor
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
-from reportlab.platypus import Table, TableStyle
+from reportlab.platypus import Paragraph, Table, TableStyle
 
 from pdf_export import config
 from pdf_export.fonts import (
@@ -58,6 +62,62 @@ def _hex(c: str):
     return HexColor(c)
 
 
+def _wrap(c, text, font, size, max_w, max_lines=4):
+    """Word-wrap a single line so drawString stays inside max_w."""
+    text = " ".join(str(text or "").split())
+    if not text or max_w <= 0 or max_lines <= 0:
+        return []
+    words = text.split(" ")
+    lines = []
+    current = ""
+
+    def width(value):
+        return c.stringWidth(value, font, size)
+
+    def push(line):
+        if len(lines) < max_lines:
+            lines.append(line)
+        return len(lines) >= max_lines
+
+    for word in words:
+        trial = (current + " " + word).strip()
+        if current and width(trial) <= max_w:
+            current = trial
+            continue
+        if current:
+            if push(current):
+                return lines
+            current = ""
+        if width(word) <= max_w:
+            current = word
+            continue
+        chunk = ""
+        for ch in word:
+            if chunk and width(chunk + ch) > max_w:
+                if push(chunk):
+                    return lines
+                chunk = ch
+            else:
+                chunk += ch
+        current = chunk
+    if current:
+        push(current)
+    return lines
+
+
+def _para(text, font, size, align="LEFT"):
+    align_map = {"LEFT": TA_LEFT, "CENTER": TA_CENTER, "RIGHT": TA_RIGHT}
+    style = ParagraphStyle(
+        "invCell",
+        fontName=font,
+        fontSize=size,
+        leading=size + 1.8,
+        alignment=align_map.get(align, TA_LEFT),
+        textColor=_hex(config.GRAPHITE),
+    )
+    return Paragraph(escape(str(text or "")), style)
+
+
 def build_invoice_pdf(order: Dict[str, Any], lang: str = "ru") -> bytes:
     ensure_fonts()
     lang = lang if lang in {"ru", "kz", "en"} else "ru"
@@ -68,8 +128,18 @@ def build_invoice_pdf(order: Dict[str, Any], lang: str = "ru") -> bytes:
     number = invoice_number(order.get("id") or "")
     order_date = format_order_date(order.get("createdAt"), lang)
     currency = (order.get("currency") or "kzt").lower()
+    if currency not in {"kzt", "usd", "rub"}:
+        currency = "kzt"
     price = order.get("priceFrom")
     has_price = price is not None and price != ""
+    if has_price:
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            price = None
+        if price is None or not math.isfinite(price) or price < 0:
+            has_price = False
+            price = None
 
     buf = io.BytesIO()
     page_w, page_h = A4
@@ -117,6 +187,8 @@ def build_invoice_pdf(order: Dict[str, Any], lang: str = "ru") -> bytes:
     right_x = page_w / 2 + 8
     block_top = y
 
+    half = page_w / 2 - margin - 16
+
     def draw_party(x, top, heading, lines):
         c.setFillColor(_hex(config.GOLD))
         c.setFont(FONT_BODY_BOLD, 10)
@@ -127,8 +199,9 @@ def build_invoice_pdf(order: Dict[str, Any], lang: str = "ru") -> bytes:
         for line in lines:
             if not line:
                 continue
-            c.drawString(x, yy, line[:90])
-            yy -= 11
+            for part in _wrap(c, line, FONT_BODY, 8.5, half, 3):
+                c.drawString(x, yy, part)
+                yy -= 11
         return yy
 
     supplier_lines = [
@@ -170,7 +243,8 @@ def build_invoice_pdf(order: Dict[str, Any], lang: str = "ru") -> bytes:
             vat_label = format_money_cell(vat, currency)
             net_label = format_money_cell(net, currency)
             gross_label = format_money_cell(gross, currency)
-            price_label = format_money_cell(gross, currency)
+            # Unit price is excl. VAT, so price × qty matches "стоимость без НДС".
+            price_label = format_money_cell(net, currency)
         total_net, total_vat, total_gross = net, vat, gross
     else:
         rate_label = s["no_vat"] if vat_rate <= 0 else f"{int(vat_rate)}%"
@@ -217,24 +291,36 @@ def build_invoice_pdf(order: Dict[str, Any], lang: str = "ru") -> bytes:
     else:
         total_row = ["", s["total"], "", "", "", s["on_agreement"], "", s["on_agreement"], s["on_agreement"]]
 
-    data = [header, row, total_row]
-    col_widths = [22, 118, 32, 28, 52, 62, 48, 52, 62]
+    def _cells(values, kind):
+        out = []
+        for index, value in enumerate(values):
+            if kind == "header":
+                font, size, align = FONT_BODY_BOLD, 6.5, "CENTER"
+            elif kind == "total" and index == 1:
+                font, size, align = FONT_BODY_BOLD, 8, "LEFT"
+            elif index == 1:
+                font, size, align = FONT_BODY, 7.5, "LEFT"
+            else:
+                font, size, align = FONT_BODY, 7, "CENTER"
+            out.append(_para(value, font, size, align))
+        return out
+
+    # Widths sum to 522 pt; usable A4 width at 36 pt margins is ~523 pt.
+    col_widths = [22, 120, 36, 32, 56, 68, 54, 60, 74]
+    data = [
+        _cells(header, "header"),
+        _cells(row, "body"),
+        _cells(total_row, "total"),
+    ]
     table = Table(data, colWidths=col_widths, repeatRows=1)
     table.setStyle(
         TableStyle(
             [
-                ("FONT", (0, 0), (-1, 0), FONT_BODY_BOLD, 7),
-                ("FONT", (0, 1), (-1, -1), FONT_BODY, 7.5),
-                ("FONT", (1, -1), (1, -1), FONT_BODY_BOLD, 8),
                 ("BACKGROUND", (0, 0), (-1, 0), _hex(config.MILKY)),
-                ("TEXTCOLOR", (0, 0), (-1, 0), _hex(config.GRAPHITE)),
-                ("TEXTCOLOR", (0, 1), (-1, -1), _hex(config.GRAPHITE)),
-                ("ALIGN", (0, 0), (0, -1), "CENTER"),
-                ("ALIGN", (2, 0), (-1, -1), "CENTER"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("GRID", (0, 0), (-1, -1), 0.4, _hex(config.SANDY)),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                 ("LEFTPADDING", (0, 0), (-1, -1), 3),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 3),
                 ("BACKGROUND", (0, -1), (-1, -1), HexColor("#faf7f2")),
@@ -246,22 +332,17 @@ def build_invoice_pdf(order: Dict[str, Any], lang: str = "ru") -> bytes:
     y = y - th - 18
 
     if has_price and total_gross is not None:
-        words = amount_in_words(total_gross, lang)
+        try:
+            words = amount_in_words(total_gross, lang, currency)
+        except ValueError:
+            words = format_money_cell(total_gross, currency)
         c.setFillColor(_hex(config.GRAPHITE))
         c.setFont(FONT_BODY_MED, 9)
-        # wrap amount words if long
-        text = s["amount_words"].format(words=words)
+        prefix = s["amount_words"].split("{words}")[0].rstrip()
         max_w = page_w - 2 * margin
-        if c.stringWidth(text, FONT_BODY_MED, 9) <= max_w:
-            c.drawString(margin, y, text)
-            y -= 16
-        else:
-            # simple split
-            c.drawString(margin, y, s["amount_words"].format(words="").rstrip(": ").rstrip() + ":")
+        for line in _wrap(c, f"{prefix} {words}".strip(), FONT_BODY_MED, 9, max_w, 4):
+            c.drawString(margin, y, line)
             y -= 12
-            c.setFont(FONT_BODY, 9)
-            c.drawString(margin, y, words)
-            y -= 16
 
     y -= 10
     c.setStrokeColor(_hex(config.GOLD))
@@ -274,9 +355,16 @@ def build_invoice_pdf(order: Dict[str, Any], lang: str = "ru") -> bytes:
     c.setFont(FONT_BODY, 9)
     director = seller.get("director_fio") or "—"
     sig_w = (page_w - 2 * margin - 20) / 2
-    c.drawString(margin, y, f"{s['director']} ________ / {director}")
-    c.drawString(margin + sig_w + 20, y, f"{s['accountant']} ________ / {s['accountant_na']}")
-    y -= 22
+    left_sig = _wrap(c, f"{s['director']} ________ / {director}", FONT_BODY, 9, sig_w, 2)
+    right_sig = _wrap(
+        c, f"{s['accountant']} ________ / {s['accountant_na']}", FONT_BODY, 9, sig_w, 2
+    )
+    for index in range(max(len(left_sig), len(right_sig), 1)):
+        if index < len(left_sig):
+            c.drawString(margin, y, left_sig[index])
+        if index < len(right_sig):
+            c.drawString(margin + sig_w + 20, y, right_sig[index])
+        y -= 13
     c.setFont(FONT_BODY_BOLD, 9)
     c.drawString(margin, y, s["stamp"])
     y -= 30

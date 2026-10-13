@@ -36,6 +36,14 @@ TEXT_MIME_TYPES = {
 MAX_EXTRACT_CHARS = 8000
 MAX_NOTE_CHARS = 7000
 
+# Production chat allowlist: images + readable docs only (no zip/xlsx/pptx/binary).
+ALLOWED_CHAT_DOCUMENT_MIME = frozenset(
+    {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+)
+
 
 @dataclass
 class ParsedAttachment:
@@ -86,6 +94,25 @@ def _strip_rtf(data: bytes) -> str:
     text = re.sub(r"\\[a-zA-Z]+-?\d* ?", " ", text)
     text = text.replace("{", " ").replace("}", " ")
     return _clean_text(text)
+
+
+def is_allowed_chat_attachment(name: str, mime: str, data: bytes) -> tuple[bool, str]:
+    """Return (allowed, normalized_mime) for public chat uploads."""
+    kind, normalized = _sniff_kind(name, mime, data)
+    if kind == "image" and normalized in VISION_IMAGE_TYPES:
+        return True, normalized
+    if kind == "text":
+        return True, normalized if normalized in TEXT_MIME_TYPES else "text/plain"
+    if kind == "document" and normalized in ALLOWED_CHAT_DOCUMENT_MIME:
+        return True, normalized
+    lower = (name or "").lower()
+    if lower.endswith(".pdf") and (not data or data[:4] == b"%PDF"):
+        return True, "application/pdf"
+    if lower.endswith(".docx") and data[:2] == b"PK":
+        return True, (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    return False, normalized
 
 
 def _sniff_kind(name: str, mime: str, data: bytes) -> tuple[str, str]:

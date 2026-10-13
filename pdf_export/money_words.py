@@ -177,24 +177,57 @@ def _plural_ru(n: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def amount_words_ru(amount) -> str:
-    """e.g. 25000 → 'Двадцать пять тысяч тенге 00 тиын'."""
+def _split_amount(amount):
+    """Whole units and a 0–99 minor part. Rejects NaN, infinity, negatives, and ≥ 1 trillion."""
     number = float(amount)
-    if not math.isfinite(number) or number < 0:
+    if not math.isfinite(number) or number < 0 or number >= 1_000_000_000_000:
         raise ValueError("bad amount")
     whole = int(math.floor(number + 1e-9))
-    tiyin = int(round((number - whole) * 100))
-    if tiyin == 100:
+    minor = int(round((number - whole) * 100))
+    if minor == 100:
         whole += 1
-        tiyin = 0
+        minor = 0
+    if whole >= 1_000_000_000_000:
+        raise ValueError("bad amount")
+    return whole, minor
+
+
+def _currency_code(currency: str) -> str:
+    code = (currency or "kzt").strip().lower()
+    return code if code in {"kzt", "usd", "rub"} else "kzt"
+
+
+def _groups(whole: int):
+    billions = whole // 1_000_000_000
+    millions = (whole % 1_000_000_000) // 1_000_000
+    thousands = (whole % 1_000_000) // 1000
+    rest = whole % 1000
+    return billions, millions, thousands, rest
+
+
+def amount_words_ru(amount, currency: str = "kzt") -> str:
+    """e.g. 25000 → 'Двадцать пять тысяч тенге 00 тиын'."""
+    whole, minor = _split_amount(amount)
+    code = _currency_code(currency)
+    majors = {
+        "kzt": ("тенге", "тенге", "тенге"),
+        "usd": ("доллар", "доллара", "долларов"),
+        "rub": ("рубль", "рубля", "рублей"),
+    }[code]
+    minors = {
+        "kzt": ("тиын", "тиын", "тиын"),
+        "usd": ("цент", "цента", "центов"),
+        "rub": ("копейка", "копейки", "копеек"),
+    }[code]
 
     if whole == 0:
         words = "ноль"
     else:
+        billions, millions, thousands, rest = _groups(whole)
         chunks = []
-        millions = whole // 1_000_000
-        thousands = (whole % 1_000_000) // 1000
-        rest = whole % 1000
+        if billions:
+            chunks.append(_triad_ru(billions, feminine=False))
+            chunks.append(_plural_ru(billions, "миллиард", "миллиарда", "миллиардов"))
         if millions:
             chunks.append(_triad_ru(millions, feminine=False))
             chunks.append(_plural_ru(millions, "миллион", "миллиона", "миллионов"))
@@ -206,7 +239,9 @@ def amount_words_ru(amount) -> str:
         words = " ".join(p for p in chunks if p).strip()
 
     words = words[:1].upper() + words[1:] if words else "Ноль"
-    return f"{words} тенге {tiyin:02d} тиын"
+    major = _plural_ru(whole, *majors)
+    minor_name = _plural_ru(minor, *minors)
+    return f"{words} {major} {minor:02d} {minor_name}"
 
 
 def _triad_kz(n: int) -> str:
@@ -227,20 +262,19 @@ def _triad_kz(n: int) -> str:
     return " ".join(parts)
 
 
-def amount_words_kz(amount) -> str:
-    number = float(amount)
-    whole = int(math.floor(number + 1e-9))
-    tiyin = int(round((number - whole) * 100))
-    if tiyin == 100:
-        whole += 1
-        tiyin = 0
+def amount_words_kz(amount, currency: str = "kzt") -> str:
+    whole, minor = _split_amount(amount)
+    code = _currency_code(currency)
+    major = {"kzt": "теңге", "usd": "АҚШ доллары", "rub": "рубль"}[code]
+    minor_name = {"kzt": "тиын", "usd": "цент", "rub": "копейка"}[code]
     if whole == 0:
         words = "нөл"
     else:
+        billions, millions, thousands, rest = _groups(whole)
         chunks = []
-        millions = whole // 1_000_000
-        thousands = (whole % 1_000_000) // 1000
-        rest = whole % 1000
+        if billions:
+            chunks.append(_triad_kz(billions))
+            chunks.append("миллиард")
         if millions:
             chunks.append(_triad_kz(millions))
             chunks.append("миллион")
@@ -251,7 +285,7 @@ def amount_words_kz(amount) -> str:
             chunks.append(_triad_kz(rest))
         words = " ".join(p for p in chunks if p).strip()
     words = words[:1].upper() + words[1:] if words else "Нөл"
-    return f"{words} теңге {tiyin:02d} тиын"
+    return f"{words} {major} {minor:02d} {minor_name}"
 
 
 def _en_under_1000(n: int) -> str:
@@ -264,20 +298,26 @@ def _en_under_1000(n: int) -> str:
     return _EN_ONES[h] + " hundred" + (f" {_en_under_1000(rem)}" if rem else "")
 
 
-def amount_words_en(amount) -> str:
-    number = float(amount)
-    whole = int(math.floor(number + 1e-9))
-    tiyin = int(round((number - whole) * 100))
-    if tiyin == 100:
-        whole += 1
-        tiyin = 0
+def amount_words_en(amount, currency: str = "kzt") -> str:
+    whole, minor = _split_amount(amount)
+    code = _currency_code(currency)
+    major_one, major_many = {
+        "kzt": ("tenge", "tenge"),
+        "usd": ("dollar", "dollars"),
+        "rub": ("ruble", "rubles"),
+    }[code]
+    minor_one, minor_many = {
+        "kzt": ("tiyin", "tiyin"),
+        "usd": ("cent", "cents"),
+        "rub": ("kopeck", "kopecks"),
+    }[code]
     if whole == 0:
         words = "zero"
     else:
+        billions, millions, thousands, rest = _groups(whole)
         parts = []
-        millions = whole // 1_000_000
-        thousands = (whole % 1_000_000) // 1000
-        rest = whole % 1000
+        if billions:
+            parts.append(_en_under_1000(billions) + " billion")
         if millions:
             parts.append(_en_under_1000(millions) + " million")
         if thousands:
@@ -286,15 +326,17 @@ def amount_words_en(amount) -> str:
             parts.append(_en_under_1000(rest))
         words = " ".join(parts)
     words = words[:1].upper() + words[1:]
-    return f"{words} tenge {tiyin:02d} tiyin"
+    major = major_one if whole == 1 else major_many
+    minor_name = minor_one if minor == 1 else minor_many
+    return f"{words} {major} {minor:02d} {minor_name}"
 
 
-def amount_in_words(amount, lang: str = "ru") -> str:
+def amount_in_words(amount, lang: str = "ru", currency: str = "kzt") -> str:
     if lang == "kz":
-        return amount_words_kz(amount)
+        return amount_words_kz(amount, currency)
     if lang == "en":
-        return amount_words_en(amount)
-    return amount_words_ru(amount)
+        return amount_words_en(amount, currency)
+    return amount_words_ru(amount, currency)
 
 
 def split_vat_from_gross(gross, vat_rate: float) -> tuple:

@@ -1,0 +1,21 @@
+services:
+  web:
+    build: .
+    image: aigerim-landing:latest
+    container_name: aigerim-landing
+    # По умолчанию только localhost (безопаснее). Для доступа с телефона в LAN:
+    # HOST_BIND=0.0.0.0 docker compose up -d
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${PORT:-8765}:8765"
+    env_file:
+      - .env
+    environment:
+      # В контейнере всегда слушаем все интерфейсы (порт наружу через publish).
+      BIND_HOST: "0.0.0.0"
+      PORT: "8765"
+    volumes:
+      # CRM, сессии, бэкапы — не теряются при пересборке образа.
+      - ./data:/app/data
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s

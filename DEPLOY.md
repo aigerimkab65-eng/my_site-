@@ -3,6 +3,28 @@
 Фронт — React (Vite) в `src/`, сборка в `dist/`. Бэкенд — `server.py` (API + раздача `dist/`).
 Исходники (`src/`, корневой `index.html` для Vite) снаружи не отдаются.
 
+## Docker (рекомендуется)
+
+Нужны Docker + Compose. В корне проекта должен быть `.env` (из `.env.example`).
+
+```bash
+cp -n .env.example .env   # если ещё нет
+# отредактировать ADMIN_PASSWORD (или HASH) / SELLER_* и т.д.
+
+docker compose up -d --build
+```
+
+Сайт: http://127.0.0.1:8765/ · админка: /admin · health: /api/health
+
+- Порт снаружи по умолчанию только `127.0.0.1` (не торчит в LAN). Для телефона в Wi‑Fi: `HOST_BIND=0.0.0.0 docker compose up -d`.
+- Внутри контейнера `BIND_HOST=0.0.0.0` (иначе publish не работает).
+- Папка `./data` монтируется в контейнер — CRM и бэкапы сохраняются при пересборке. Entrypoint чинит владельца volume под uid `10001` (важно на Linux VPS).
+- Фото товаров хранятся в SQLite (`data/crm.db`), не в образе.
+- За nginx: `proxy_set_header X-Forwarded-Proto $scheme;` и при необходимости `TRUSTED_PROXIES` (IP docker-bridge / хоста, не только 127.0.0.1).
+- Остановка: `docker compose down` (данные в `./data` остаются).
+- Логи: `docker compose logs -f web`
+- Не коммить `.env`. `docker compose config` печатает секреты в stdout — не шарить вывод.
+
 ## Быстрый чеклист
 
 1. Скопировать проект на сервер, создать `.env` из `.env.example`.

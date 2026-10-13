@@ -1,0 +1,30 @@
+.git
+.github
+.venv
+.tools
+.node_modules
+node_modules
+dist
+data
+test-results
+playwright-report
+e2e
+docs
+*.md
+!DEPLOY.md
+.env
+.DS_Store
+**/.DS_Store
+Projects.code-workspace
+.cursorignore
+Start Site.command
+Stop Site.command
+start.sh
+scripts/run-server.sh
+test_*.py
+playwright.config.cjs
+*.pyc
+__pycache__
+**/__pycache__
+*.log
+*.pid

@@ -6,6 +6,7 @@ import cgi
 import hashlib
 import hmac
 import json
+import math
 import mimetypes
 import os
 import re
@@ -19,6 +20,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from ai.bootstrap import get_engine, init as init_ai
+from ai.core.files import is_allowed_chat_attachment
 from ai.features.consultant.attachments import build_openai_messages
 from ai.tools.catalog import (
     SERVICE_PRICES_KZT,
@@ -594,12 +596,38 @@ def login_allowed(ip):
 def clean_order_price(value):
     if value is None or value == "":
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("Некорректные данные") from None
+    if not math.isfinite(number):
+        raise ValueError("Некорректные данные")
     if number < 0 or number > 1_000_000_000:
         raise ValueError("Некорректные данные")
     if number.is_integer():
         return int(number)
     return round(number, 2)
+
+
+def trusted_proxy_peers():
+    raw = os.environ.get("TRUSTED_PROXIES", "127.0.0.1,::1")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def client_ip(handler):
+    """Client IP for rate limits. Trust X-Real-IP / XFF only from TRUSTED_PROXIES."""
+    peer = (handler.client_address[0] if handler.client_address else "") or "unknown"
+    if peer not in trusted_proxy_peers():
+        return peer
+    real = (handler.headers.get("X-Real-IP") or "").strip()
+    if real:
+        return real.split(",", 1)[0].strip() or peer
+    xff = (handler.headers.get("X-Forwarded-For") or "").strip()
+    if xff:
+        parts = [part.strip() for part in xff.split(",") if part.strip()]
+        if parts:
+            return parts[-1]
+    return peer
 
 
 def clean_idempotency_key(value):
@@ -633,8 +661,10 @@ def create_order(payload):
     lang = clean_text(payload.get("lang"), 8).lower() or "ru"
     if lang not in {"ru", "kz", "en"}:
         lang = "ru"
-    currency = clean_currency(payload.get("currency") or "kzt")
-    price_from = clean_order_price(payload.get("priceFrom"))
+    # Never trust client-supplied price/currency for billing fields.
+    # Only shop catalog or shared service catalog may set them.
+    currency = "kzt"
+    price_from = None
 
     # Shop orders: trust SQLite catalog, not client-supplied price/name.
     if source == "shop":
@@ -723,6 +753,36 @@ def create_order(payload):
                     (client_phone, source, service_name, since),
                 ).fetchone()
             if recent:
+                # Refresh mutable fields so CRM matches the WhatsApp text the client sends.
+                conn.execute(
+                    """
+                    UPDATE orders SET
+                        updated_at = ?,
+                        message = ?,
+                        client_name = ?,
+                        service_name = ?,
+                        price_from = ?,
+                        currency = ?,
+                        lang = ?,
+                        visitor_id = CASE WHEN ? != '' THEN ? ELSE visitor_id END,
+                        page_path = CASE WHEN ? != '' THEN ? ELSE page_path END
+                    WHERE id = ?
+                    """,
+                    (
+                        now,
+                        message,
+                        client_name,
+                        service_name,
+                        price_from,
+                        currency,
+                        lang,
+                        visitor_id,
+                        visitor_id,
+                        page_path,
+                        page_path,
+                        recent["id"],
+                    ),
+                )
                 if idem_key:
                     conn.execute(
                         """
@@ -731,10 +791,14 @@ def create_order(payload):
                         """,
                         (idem_key, recent["id"], now),
                     )
-                    conn.commit()
+                conn.commit()
+                refreshed = conn.execute(
+                    "SELECT * FROM orders WHERE id = ?",
+                    (recent["id"],),
+                ).fetchone()
                 created = False
                 _CREATE_ORDER_META.created = created
-                return order_row_to_dict(recent)
+                return order_row_to_dict(refreshed or recent)
 
             try:
                 conn.execute(
@@ -1096,7 +1160,10 @@ def request_wants_secure_cookie(handler):
         return True
     if flag in {"0", "false", "no", "off"}:
         return False
-    # Only trust forwarded proto from peers that can reach BIND_HOST (usually nginx on localhost).
+    # Only trust forwarded proto from reverse proxies we configured.
+    peer = (handler.client_address[0] if handler.client_address else "") or ""
+    if peer not in trusted_proxy_peers():
+        return False
     proto = handler.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
     return proto == "https"
 
@@ -1344,6 +1411,7 @@ def chat_allowed(ip):
 
 
 def normalize_chat_messages(raw, allow_empty_last=False):
+    """Keep only user turns — ignore client-forged assistant/system history."""
     if not isinstance(raw, list):
         raise ValueError("Некорректные данные")
     cleaned = []
@@ -1352,14 +1420,14 @@ def normalize_chat_messages(raw, allow_empty_last=False):
             continue
         role = item.get("role")
         content = " ".join(str(item.get("content") or "").split())
-        if role not in {"user", "assistant"}:
+        if role != "user":
             continue
         if not content:
-            if allow_empty_last and role == "user":
-                cleaned.append({"role": role, "content": ""})
+            if allow_empty_last:
+                cleaned.append({"role": "user", "content": ""})
             continue
-        cleaned.append({"role": role, "content": content[:CHAT_MAX_CHARS]})
-    if not cleaned or cleaned[-1]["role"] != "user":
+        cleaned.append({"role": "user", "content": content[:CHAT_MAX_CHARS]})
+    if not cleaned:
         raise ValueError("Напишите сообщение")
     if not cleaned[-1]["content"] and not allow_empty_last:
         raise ValueError("Напишите сообщение")
@@ -1398,9 +1466,10 @@ def normalize_chat_attachments(raw):
         name = clean_text(item.get("name"), 120) or "file"
         mime = clean_text(item.get("type"), 120).lower() or "application/octet-stream"
         data = decode_attachment_data(item.get("data"))
-        # Any file type is accepted (size/count limits still apply).
-        # AI core sniffs magic bytes and parses content for the consultant.
-        cleaned.append({"name": name, "type": mime, "data": data})
+        allowed, normalized_mime = is_allowed_chat_attachment(name, mime, data)
+        if not allowed:
+            raise ValueError("Этот тип файла не поддерживается")
+        cleaned.append({"name": name, "type": normalized_mime, "data": data})
     return cleaned
 
 
@@ -1602,7 +1671,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error": "Не найдено"}, 404)
 
     def create_order_request(self):
-        ip = self.client_address[0] if self.client_address else "unknown"
+        ip = client_ip(self)
         if not order_allowed(ip):
             self.send_json({"error": "Слишком много запросов. Подождите немного."}, 429)
             return
@@ -1637,7 +1706,7 @@ class Handler(BaseHTTPRequestHandler):
     def chat(self):
         """Stateless reply: only the messages/attachments from this request are used.
         No chat history is stored or shared between visitors."""
-        ip = self.client_address[0] if self.client_address else "unknown"
+        ip = client_ip(self)
         if not chat_allowed(ip):
             self.send_json({"error": "Слишком много запросов. Подождите немного."}, 429)
             return
@@ -1710,7 +1779,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"ok": True})
 
     def login(self):
-        ip = self.client_address[0] if self.client_address else "unknown"
+        ip = client_ip(self)
         if not login_allowed(ip):
             self.send_json({"error": "Слишком много попыток входа. Подождите немного."}, 429)
             return
