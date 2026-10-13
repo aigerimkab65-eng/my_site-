@@ -1,29 +1,59 @@
+# Secrets / local env (keep only the template)
 .env
 .env.*
 !.env.example
+
+# Python
 .venv/
-data/crm.db
-data/crm.db-*
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+.eggs/
+
+# Node / frontend build
+node_modules/
+dist/
+
+# Local tooling
+.tools/
+
+# CRM data, DB copies, uploads, runtime logs (do not commit PII)
+data/*.db
+data/*.db-*
 data/backups/
 data/uploads/
 data/config.json
 data/config.json.migrated
 data/products.json
 data/products.json.migrated
+data/*.log
+data/*.pid
 data/server.out.log
 data/server.err.log
 data/server.pid
-node_modules/
-dist/
-.tools/
+
+# Tests / Playwright
 /test-results/
 /playwright-report/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.coverage
-htmlcov/
+/blob-report/
 
+# Logs anywhere
+*.log
+*.pid
+
+# OS / IDE
 .DS_Store
 **/.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
