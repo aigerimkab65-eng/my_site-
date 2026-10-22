@@ -525,9 +525,10 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
       const data = await response.json().catch(() => ({}));
       if (!mountedRef.current) return;
       if (!response.ok) {
-        let errorText = data.error || t("chat.error");
-        if (response.status === 429) errorText = data.error || t("chat.rateLimit");
-        else if (response.status === 503) errorText = data.error || t("chat.busy");
+        // Prefer UI translations — server errors may be Russian by default.
+        let errorText = t("chat.error");
+        if (response.status === 429) errorText = t("chat.rateLimit");
+        else if (response.status === 503) errorText = t("chat.busy");
         setBubbles((prev) => [
           ...prev.filter((b) => b.id !== typingId),
           {

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Сайт и админка. Все CRM-данные — SQLite (data/crm.db) через crm_store."""
+"""Сайт и админка. Все CRM-данные — PostgreSQL через crm_store."""
 
 import base64
 import cgi
+import gzip
 import hashlib
 import hmac
 import json
@@ -11,7 +12,6 @@ import mimetypes
 import os
 import re
 import secrets
-import sqlite3
 import sys
 import threading
 import time
@@ -36,10 +36,11 @@ from crm_store import (
     DB_LOCK,
     DB_WRITE_LOCK,
     IMAGE_EXT,
-    ORDERS_DB,
     ROOT,
     UPLOADS,
+    IntegrityError,
     create_admin_session,
+    database_label,
     db_connect,
     delete_admin_session,
     delete_all_admin_sessions,
@@ -52,6 +53,15 @@ from crm_store import (
     product_id_from_image_url,
     product_price_to_db,
     set_admin_password_hash,
+)
+
+_BACKUP_TABLES = (
+    "orders",
+    "clients",
+    "products",
+    "settings",
+    "order_idempotency",
+    "admin_sessions",
 )
 
 mimetypes.add_type("font/woff2", ".woff2")
@@ -67,6 +77,26 @@ CHAT_MAX_CHARS = 800
 CHAT_MAX_ATTACHMENTS = 3
 CHAT_MAX_FILE_BYTES = 4 * 1024 * 1024
 CHAT_MAX_REQUEST_BYTES = 18 * 1024 * 1024
+CHAT_I18N = {
+    "ru": {
+        "rateLimit": "Слишком много запросов. Подождите немного.",
+        "needSession": "Нужна сессия чата",
+        "needMessage": "Напишите сообщение или прикрепите файл",
+        "unavailable": "Сервис временно недоступен. Попробуйте позже.",
+    },
+    "en": {
+        "rateLimit": "Too many requests. Please wait a moment.",
+        "needSession": "Chat session is required",
+        "needMessage": "Write a message or attach a file",
+        "unavailable": "Service is temporarily unavailable. Please try again later.",
+    },
+    "kz": {
+        "rateLimit": "Сұраныс тым көп. Біраз күтіңіз.",
+        "needSession": "Чат сессиясы қажет",
+        "needMessage": "Хабарлама жазыңыз немесе файл тіркеңіз",
+        "unavailable": "Сервис уақытша қолжетімсіз. Кейінірек қайталап көріңіз.",
+    },
+}
 ORDER_SOURCES = {"service", "custom", "chat", "contact", "shop"}
 ORDER_STATUSES = {"new", "in_progress", "done", "cancelled"}
 # Soft anti-dupe window when the same person resubmits the same service quickly
@@ -121,7 +151,7 @@ def verify_admin_password(plain: str, password_hash: str) -> bool:
 def ensure_admin_credentials():
     """
     Require ADMIN_PASSWORD or ADMIN_PASSWORD_HASH in .env. Store only bcrypt hash
-    in SQLite. Never auto-generate credentials. Never log the password.
+    in PostgreSQL. Never auto-generate credentials. Never log the password.
     """
     global _ADMIN_PASSWORD_HASH
     load_env()
@@ -167,7 +197,7 @@ def ensure_admin_credentials():
         )
     else:
         print(
-            "[auth] admin password hash stored in SQLite settings.",
+            "[auth] admin password hash stored in PostgreSQL settings.",
             file=sys.stderr,
         )
     _ADMIN_PASSWORD_HASH = new_hash
@@ -394,7 +424,9 @@ def prune_backups(keep):
     if not BACKUPS_DIR.is_dir():
         return
     files = sorted(
-        BACKUPS_DIR.glob("crm-*.db"),
+        list(BACKUPS_DIR.glob("crm-*.json.gz"))
+        + list(BACKUPS_DIR.glob("crm-*.db"))
+        + list(BACKUPS_DIR.glob("crm-*.dump")),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -405,23 +437,39 @@ def prune_backups(keep):
             pass
 
 
+def _serialize_backup_row(table, row):
+    item = dict(row)
+    if table == "products" and item.get("image_blob") is not None:
+        item["image_blob"] = base64.b64encode(bytes(item["image_blob"])).decode(
+            "ascii"
+        )
+        item["_image_blob_b64"] = True
+    return item
+
+
 def backup_crm_db(reason="manual"):
-    if not ORDERS_DB.is_file():
-        return None
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest = BACKUPS_DIR / f"crm-{stamp}.db"
+    dest = BACKUPS_DIR / f"crm-{stamp}.json.gz"
+    payload = {
+        "version": 1,
+        "engine": "postgresql",
+        "created_at": time.time(),
+        "reason": reason,
+        "tables": {},
+    }
     with DB_WRITE_LOCK:
-        src = db_connect()
+        conn = db_connect()
         try:
-            dst = sqlite3.connect(str(dest))
-            try:
-                src.backup(dst)
-                dst.commit()
-            finally:
-                dst.close()
+            for table in _BACKUP_TABLES:
+                rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+                payload["tables"][table] = [
+                    _serialize_backup_row(table, row) for row in rows
+                ]
         finally:
-            src.close()
+            conn.close()
+    with gzip.open(dest, "wt", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
     _, keep, _ = backup_settings()
     prune_backups(keep)
     print(f"[crm-backup] {reason}: {dest.name}")
@@ -454,7 +502,7 @@ def health_status():
         "ok": True,
         "ts": time.time(),
         "db": "up",
-        "storage": "sqlite",
+        "storage": "postgresql",
         "orders": 0,
         "clients": 0,
         "products": 0,
@@ -481,7 +529,7 @@ def health_status():
     except Exception as error:
         payload["ok"] = False
         payload["db"] = "down"
-        # Do not leak paths / SQLite details to public health clients.
+        # Do not leak connection details to public health clients.
         print(f"[health] database check failed: {error}", file=sys.stderr)
     return payload
 
@@ -667,7 +715,7 @@ def create_order(payload):
     currency = "kzt"
     price_from = None
 
-    # Shop orders: trust SQLite catalog, not client-supplied price/name.
+    # Shop orders: trust DB catalog, not client-supplied price/name.
     if source == "shop":
         if not service_id:
             raise ValueError("Некорректные данные")
@@ -836,7 +884,7 @@ def create_order(payload):
                         (idem_key, order_id, now),
                     )
                 conn.commit()
-            except sqlite3.IntegrityError:
+            except IntegrityError:
                 # Another writer (e.g. second process) won the idempotency race.
                 conn.rollback()
                 if idem_key:
@@ -1144,7 +1192,7 @@ def delete_order(order_id):
             conn.close()
 
 
-# Opaque server-side sessions (SQLite). Extended on each authenticated request.
+# Opaque server-side sessions (PostgreSQL). Extended on each authenticated request.
 SESSION_MAX_AGE = ADMIN_SESSION_TTL_SEC  # 7 days
 
 
@@ -1330,7 +1378,7 @@ def safe_file(url_path):
 
 
 def remove_image(rel):
-    """Best-effort cleanup of legacy on-disk product uploads (blobs live in SQLite)."""
+    """Best-effort cleanup of legacy on-disk product uploads (blobs live in PostgreSQL)."""
     if not rel:
         return
     path = (ROOT / rel).resolve()
@@ -1340,7 +1388,7 @@ def remove_image(rel):
 
 
 def save_image(fileitem, product_id):
-    """Read upload into memory for SQLite BLOB storage (no disk write)."""
+    """Read upload into memory for PostgreSQL BYTEA storage (no disk write)."""
     filename = fileitem.filename or ""
     ext = Path(filename).suffix.lower()
     if ext not in IMAGE_EXT:
@@ -1585,7 +1633,7 @@ class Handler(BaseHTTPRequestHandler):
             clients = list_clients(include_hidden=include_hidden)
             self.send_json({"clients": clients, "total": len(clients)})
             return
-        # Product photos are stored as SQLite BLOBs; URL stays /assets/products/<id>.ext
+        # Product photos are stored as PostgreSQL BYTEA; URL stays /assets/products/<id>.ext
         product_id = product_id_from_image_url(path)
         if product_id:
             stored = get_product_image_bytes(product_id)
@@ -1709,21 +1757,23 @@ class Handler(BaseHTTPRequestHandler):
         No chat history is stored or shared between visitors."""
         ip = client_ip(self)
         if not chat_allowed(ip):
-            self.send_json({"error": "Слишком много запросов. Подождите немного."}, 429)
+            # Lang unknown before body parse; UI uses its own i18n for 429.
+            self.send_json({"error": CHAT_I18N["ru"]["rateLimit"]}, 429)
             return
         body = self.read_json(CHAT_MAX_REQUEST_BYTES)
         lang = str(body.get("lang") or "ru").strip().lower()
         if lang not in {"ru", "kz", "en"}:
             lang = "ru"
+        msg = CHAT_I18N.get(lang, CHAT_I18N["ru"])
         # sessionId is accepted for client isolation; server never persists chats.
         session_id = str(body.get("sessionId") or "").strip()[:80]
         if not session_id:
-            self.send_json({"error": "Нужна сессия чата"}, 400)
+            self.send_json({"error": msg["needSession"]}, 400)
             return
         attachments = normalize_chat_attachments(body.get("attachments"))
         messages = normalize_chat_messages(body.get("messages"), allow_empty_last=bool(attachments))
         if not messages[-1]["content"] and not attachments:
-            self.send_json({"error": "Напишите сообщение или прикрепите файл"}, 400)
+            self.send_json({"error": msg["needMessage"]}, 400)
             return
         try:
             engine = get_engine()
@@ -1741,7 +1791,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self.send_json(
                 {
-                    "reply": "Сервис временно недоступен. Попробуйте позже.",
+                    "reply": msg["unavailable"],
                     "mode": "local",
                     "sessionId": session_id,
                 }
@@ -2034,7 +2084,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "Товар не найден"}, 404)
             return
         product = self.product_from_form(form, product_id, previous)
-        # Persist SQLite (incl. BLOB) first; then drop any legacy disk file.
+        # Persist PostgreSQL (incl. BYTEA) first; then drop any legacy disk file.
         saved = update_product_record(product)
         if saved and product.get("_image_blob") is not None:
             remove_image(previous.get("image"))
@@ -2042,10 +2092,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    load_env()
     DATA.mkdir(parents=True, exist_ok=True)
     UPLOADS.mkdir(parents=True, exist_ok=True)
     init_crm_db()
-    load_env()
     ensure_admin_credentials()
     prune_expired_admin_sessions()
     init_ai(create_order=create_order)
@@ -2061,7 +2111,7 @@ def main():
     print(f"Сайт:    http://{host}:{port}/")
     print(f"Админка: http://{host}:{port}/admin")
     print(f"Health:  http://{host}:{port}/api/health")
-    print(f"CRM БД:  {ORDERS_DB}")
+    print(f"CRM БД:  {database_label()}")
     server.serve_forever()
 
 
