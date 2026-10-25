@@ -4,7 +4,8 @@ services:
     container_name: aigerim-db
     environment:
       POSTGRES_USER: "${POSTGRES_USER:-aigerim}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-aigerim}"
+      # No default password — set POSTGRES_PASSWORD in .env (see .env.example).
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
       POSTGRES_DB: "${POSTGRES_DB:-aigerim_crm}"
     ports:
       # Для локального `python3 server.py` / тестов на хосте.
@@ -33,7 +34,7 @@ services:
       # В контейнере всегда слушаем все интерфейсы (порт наружу через publish).
       BIND_HOST: "0.0.0.0"
       PORT: "8765"
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-aigerim}:${POSTGRES_PASSWORD:-aigerim}@db:5432/${POSTGRES_DB:-aigerim_crm}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-aigerim}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-aigerim_crm}"
     volumes:
       # Бэкапы CRM и uploads — не теряются при пересборке. Данные CRM — в volume pgdata.
       - ./data:/app/data
