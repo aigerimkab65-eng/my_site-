@@ -13,7 +13,7 @@
 | Часть | Технологии | Роль |
 |--------|------------|------|
 | Frontend | React, Vite | Сайт и админка; сборка в папку `dist/` |
-| Backend | Python (`server.py`), SQLite | API, раздача статики, CRM, PDF, AI-консультант |
+| Backend | Python (`server.py`), PostgreSQL | API, раздача статики, CRM, PDF, AI-консультант |
 
 В обычном (не Docker) режиме нужно: `npm run build`, затем `python3 server.py`.  
 В Docker оба шага выполняются внутри образов автоматически.
@@ -96,7 +96,7 @@ HOST_BIND=0.0.0.0 docker compose up -d
 
 | Решение | Зачем |
 |---------|--------|
-| Volume `./data:/app/data` | CRM (SQLite), сессии и бэкапы не пропадают при пересборке образа |
+| Volume `./data:/app/data` | бэкапы CRM и uploads; сами данные CRM — в volume Postgres `pgdata` |
 | `.env` не копируется в образ | Секреты не попадают в слои Docker-образа |
 | Пользователь UID 10001 | Процесс не работает от root |
 | `docker-entrypoint.sh` | Чинит права на смонтированный `data/` (важно на Linux VPS) |
@@ -105,7 +105,7 @@ HOST_BIND=0.0.0.0 docker compose up -d
 | `init: true` | Корректная обработка сигналов и дочерних процессов |
 | `.dockerignore` | Быстрее сборка, в контекст не попадают секреты и мусор |
 
-Фото товаров хранятся в SQLite (`data/crm.db`) как BLOB — они живут вместе с volume `data/`, а не «внутри» временного слоя контейнера.
+Фото товаров хранятся в PostgreSQL как BYTEA (volume `pgdata`), а не «внутри» временного слоя контейнера.
 
 ---
 

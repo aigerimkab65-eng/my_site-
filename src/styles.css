@@ -611,6 +611,22 @@ a {
   letter-spacing: 0.02em;
 }
 
+.service-cat-intro {
+  margin: -8px 0 24px;
+  max-width: 52ch;
+  color: var(--gray);
+  font-size: 16px;
+  line-height: 1.55;
+  white-space: pre-line;
+}
+
+.service-cat-footer {
+  margin: 20px 0 0;
+  color: var(--gray);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
 .service-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -985,6 +1001,14 @@ a {
   width: min(var(--max), calc(100% - 2 * var(--pad)));
   margin: 0 auto;
   padding: clamp(64px, 10vw, 110px) 0 clamp(24px, 4vw, 48px);
+}
+
+.shop > .expo-title {
+  margin-bottom: 36px;
+}
+
+.shop-empty .btn-outline {
+  margin-top: 16px;
 }
 
 .shop-filters {
@@ -1904,6 +1928,31 @@ body.modal-open {
   cursor: pointer;
 }
 
+.admin-product-form {
+  margin-bottom: 28px;
+}
+
+.admin-product-form .admin-list-title {
+  margin-bottom: 18px;
+}
+
+.admin-product-form-preview {
+  width: min(160px, 40%);
+  aspect-ratio: 4 / 5;
+  margin: 0 0 18px;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1.5px solid var(--black);
+  background: var(--milky);
+}
+
+.admin-product-form-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: none;
+}
+
 .admin-product-list {
   display: flex;
   flex-direction: column;
@@ -1912,13 +1961,29 @@ body.modal-open {
 
 .admin-product-row {
   display: grid;
-  grid-template-columns: auto 64px minmax(0, 1fr);
+  grid-template-columns: auto 64px minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   padding: 10px 12px;
   background: #fff;
   border: 1.5px solid var(--black);
   border-radius: 16px;
+}
+
+.admin-product-row-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.admin-product-row-actions button {
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
 }
 
 .admin-product-row.is-selected {
@@ -2021,7 +2086,7 @@ body.modal-open {
   }
 
   .admin-product-row {
-    grid-template-columns: auto 52px minmax(0, 1fr);
+    grid-template-columns: auto 52px minmax(0, 1fr) auto;
   }
 
   .admin-product-thumb {
@@ -2176,6 +2241,14 @@ body.modal-open {
   flex-direction: column;
   align-items: flex-end;
   gap: 12px;
+  /* Let taps pass through empty widget chrome to page buttons underneath
+     (order / view-work in services). Only fab + open panel capture clicks. */
+  pointer-events: none;
+}
+
+.chat-widget .chat-fab,
+.chat-widget .chat-panel.is-visible {
+  pointer-events: auto;
 }
 
 .chat-fab {
@@ -2319,6 +2392,13 @@ body.modal-open {
   transition: opacity 0.25s var(--ease), transform 0.25s var(--ease);
   pointer-events: none;
   overflow: hidden;
+}
+
+/* Author `display:flex` must not override the HTML [hidden] attribute —
+   otherwise the closed panel still occupies ~half the mobile screen and
+   steals taps from «Заказать в WhatsApp» / «Посмотреть работы». */
+.chat-panel[hidden] {
+  display: none !important;
 }
 
 .chat-panel.is-visible {

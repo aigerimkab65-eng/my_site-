@@ -3,6 +3,7 @@ import Header from "../components/landing/Header.jsx";
 import Hero from "../components/landing/Hero.jsx";
 import Story from "../components/landing/Story.jsx";
 import Services from "../components/landing/Services.jsx";
+import Shop from "../components/landing/Shop.jsx";
 import Process from "../components/landing/Process.jsx";
 import Contact from "../components/landing/Contact.jsx";
 import Footer from "../components/landing/Footer.jsx";
@@ -84,6 +85,7 @@ export default function LandingPage() {
         <Hero />
         <Story />
         <Services onOpenLead={openLead} visitorId={visitorId} />
+        <Shop onOpenLead={openLead} visitorId={visitorId} />
         <Process />
         <Contact onOpenLead={openLead} visitorId={visitorId} />
       </main>

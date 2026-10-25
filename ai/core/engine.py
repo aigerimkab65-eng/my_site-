@@ -5,8 +5,8 @@ from typing import Any
 from ai.core.llm import chat_with_tools
 from ai.core.registry import FeatureRegistry, ToolRegistry
 from ai.core.types import RunResult
+from ai.features.consultant.local import prefer_local_price_reply
 from ai.features.consultant.prompt import consultant_system_for, reply_matches_lang
-from ai.tools.catalog import detect_service
 
 _UNAVAILABLE = {
     "en": "Service is temporarily unavailable. Please try again later.",
@@ -45,8 +45,8 @@ class Engine:
         merged["lang"] = site_lang
         unavailable = _UNAVAILABLE.get(site_lang, _UNAVAILABLE["ru"])
 
-        # Price-list chip / clear service name → local reply in site language
-        # (OpenAI often ignores lang when the base prompt was Russian).
+        # Price-list chips + website questions → local reply with public prices.
+        # (OpenAI often skips numbers on vague asks like "хочу сайт".)
         if (
             feature_id == "consultant"
             and feature.local_fallback is not None
@@ -54,7 +54,7 @@ class Engine:
             and messages
         ):
             last_text = str(messages[-1].get("content") or "")
-            if detect_service(last_text.lower()):
+            if prefer_local_price_reply(last_text):
                 try:
                     local_hit = feature.local_fallback(messages, site_lang, attachments)
                 except Exception:

@@ -22,6 +22,7 @@ export default function Header({ onContactOpen }) {
       </a>
       <nav className="pill-nav" aria-label={t("nav.label")}>
         <a href="#services">{t("nav.services")}</a>
+        <a href="#shop">{t("nav.shop")}</a>
         <a href="#process">{t("nav.process")}</a>
         <a
           href={TELEGRAM_PORTFOLIO}

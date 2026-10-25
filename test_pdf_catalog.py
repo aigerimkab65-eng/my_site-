@@ -7,7 +7,6 @@ import io
 import json
 import os
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -18,22 +17,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-# Isolated DB for this suite
-_TMP = tempfile.TemporaryDirectory(prefix="ak-pdf-")
-_DATA = Path(_TMP.name)
 os.environ["ADMIN_PASSWORD"] = "pdf-test-pass"
 os.environ["ADMIN_SECRET"] = "pdf-test-secret-0123456789ab"
-# Point CRM at temp db before importing server/crm_store
-import crm_store  # noqa: E402
 
-crm_store.DATA = _DATA
-crm_store.ORDERS_DB = _DATA / "crm.db"
-crm_store.BACKUPS_DIR = _DATA / "backups"
-crm_store.UPLOADS = _DATA / "uploads"
-crm_store.PRODUCTS_FILE = _DATA / "products.json"
-crm_store.PRODUCTS_MIGRATED = _DATA / "products.json.migrated"
-crm_store.CONFIG_FILE = _DATA / "config.json"
-_DATA.mkdir(parents=True, exist_ok=True)
+from test_support import prepare  # noqa: E402
+
+crm_store, _SCHEMA, _DATA = prepare("ak-pdf")
 
 import server  # noqa: E402
 from pdf_export.catalog import build_catalog_pdf  # noqa: E402

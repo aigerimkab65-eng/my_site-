@@ -98,6 +98,49 @@ SERVICE_CATALOG = [
         "keys": ("комплект карточек", "набор карточек", "pack of cards", "product pack"),
         "soft": ("комплект", "набор"),
     },
+    {
+        "id": "sites.card",
+        "name": {
+            "ru": "Сайт-визитка",
+            "kz": "Сайт-визитка",
+            "en": "Business-card site",
+        },
+        "price_kzt": 50000,
+        "keys": ("сайт-визитк", "сайт визитк", "визитк", "business-card site", "business card site"),
+        "soft": ("визитк",),
+    },
+    {
+        "id": "sites.landing",
+        "name": {"ru": "Лендинг", "kz": "Лендинг", "en": "Landing page"},
+        "price_kzt": 100000,
+        "keys": ("лендинг", "landing", "landing page"),
+        "soft": (),
+    },
+    {
+        "id": "sites.other",
+        "name": {
+            "ru": "Другие проекты",
+            "kz": "Басқа жобалар",
+            "en": "Other projects",
+        },
+        # No fixed public price — quote is individual.
+        "price_kzt": None,
+        "keys": (
+            "другие проект",
+            "басқа жоба",
+            "other project",
+            "интернет-магазин",
+            "internet store",
+            "online store",
+            "корпоративн сайт",
+            "corporate site",
+            "3d-сайт",
+            "3d сайт",
+            "анимационн сайт",
+            "animated site",
+        ),
+        "soft": ("магазин", "интеграц", "crm"),
+    },
 ]
 
 # Old short ids from earlier AI catalog → canonical.
@@ -113,7 +156,17 @@ LEGACY_SERVICE_IDS = {
     "pack": "design.pack",
 }
 
-SERVICE_PRICES_KZT = {item["id"]: item["price_kzt"] for item in SERVICE_CATALOG}
+SERVICE_PRICES_KZT = {
+    item["id"]: item["price_kzt"]
+    for item in SERVICE_CATALOG
+    if item.get("price_kzt") is not None
+}
+
+CUSTOM_PRICE_LABEL = {
+    "ru": "Индивидуальный расчёт",
+    "kz": "Жеке есеп",
+    "en": "Custom quote",
+}
 
 
 def normalize_service_id(service_id: str) -> str:
@@ -150,6 +203,11 @@ def score_service(text, service):
     sid = service["id"]
     if sid == "ai.photo" and contains_any(text, ("анимац", "ожив", "animat")):
         score -= 2
+    if sid == "ai.viz3d" and contains_any(
+        text, ("сайт", "website", "лендинг", "landing", "визитк")
+    ):
+        # "3D сайт" is a website project, not 3D product visualization.
+        score -= 3
     if sid == "design.card" and contains_any(text, ("комплект", "набор", "инфограф", "pack")):
         score -= 2
     if sid == "design.pack" and "карточ" not in text and "product" not in text:
@@ -182,7 +240,17 @@ def service_by_id(service_id: str):
 
 def format_service(service, lang: str = "ru") -> dict:
     lang = lang if lang in {"ru", "kz", "en"} else "ru"
-    price_kzt = int(service["price_kzt"])
+    raw_price = service.get("price_kzt")
+    if raw_price is None:
+        return {
+            "id": service["id"],
+            "name": service["name"].get(lang) or service["name"]["ru"],
+            "price_from": CUSTOM_PRICE_LABEL.get(lang) or CUSTOM_PRICE_LABEL["ru"],
+            "price_kzt": None,
+            "currency": "kzt",
+            "names": service["name"],
+        }
+    price_kzt = int(raw_price)
     return {
         "id": service["id"],
         "name": service["name"].get(lang) or service["name"]["ru"],

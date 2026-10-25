@@ -1,4 +1,24 @@
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: aigerim-db
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-aigerim}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-aigerim}"
+      POSTGRES_DB: "${POSTGRES_DB:-aigerim_crm}"
+    ports:
+      # Для локального `python3 server.py` / тестов на хосте.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
   web:
     build: .
     image: aigerim-landing:latest
@@ -13,9 +33,16 @@ services:
       # В контейнере всегда слушаем все интерфейсы (порт наружу через publish).
       BIND_HOST: "0.0.0.0"
       PORT: "8765"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-aigerim}:${POSTGRES_PASSWORD:-aigerim}@db:5432/${POSTGRES_DB:-aigerim_crm}"
     volumes:
-      # CRM, сессии, бэкапы — не теряются при пересборке образа.
+      # Бэкапы CRM и uploads — не теряются при пересборке. Данные CRM — в volume pgdata.
       - ./data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
     init: true
     stop_grace_period: 15s
+
+volumes:
+  pgdata:

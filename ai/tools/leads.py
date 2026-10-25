@@ -68,8 +68,9 @@ def _handle_create_lead(args: dict, context: dict):
         formatted = format_service(matched, lang)
         payload["serviceId"] = formatted["id"]
         payload["serviceName"] = service_name or formatted["name"]
-        payload["priceFrom"] = formatted["price_kzt"]
-        payload["currency"] = "kzt"
+        if formatted.get("price_kzt") is not None:
+            payload["priceFrom"] = formatted["price_kzt"]
+            payload["currency"] = "kzt"
 
     try:
         order = create_order(payload)

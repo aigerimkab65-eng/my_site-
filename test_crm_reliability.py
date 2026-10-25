@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Проверки CRM: заказы, клиенты, доступ, статика. Запуск: python3 test_crm_reliability.py
 
-Все записи идут во временную SQLite-БД — боевой data/crm.db не трогается.
+Все записи идут во временную PostgreSQL-схему — боевые данные не трогаются.
+Нужен запущенный Postgres (docker compose up -d db) и DATABASE_URL в .env.
 """
 
 import json
 import os
-import sqlite3
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -19,24 +18,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-_TMP = tempfile.TemporaryDirectory(prefix="ak-crm-")
-_DATA = Path(_TMP.name)
 os.environ.setdefault("ADMIN_PASSWORD", "test-pass")
 os.environ.setdefault("ADMIN_SECRET", "test-secret-0123456789abcdef")
-os.environ["CRM_BACKUP_ON_START"] = "0"
 
-import crm_store  # noqa: E402
+from test_support import prepare  # noqa: E402
 
-crm_store.DATA = _DATA
-crm_store.ORDERS_DB = _DATA / "crm.db"
-crm_store.BACKUPS_DIR = _DATA / "backups"
-crm_store.UPLOADS = _DATA / "uploads"
-crm_store.PRODUCTS_FILE = _DATA / "products.json"
-crm_store.PRODUCTS_MIGRATED = _DATA / "products.json.migrated"
-crm_store.CONFIG_FILE = _DATA / "config.json"
-_DATA.mkdir(parents=True, exist_ok=True)
-crm_store.BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
-crm_store.UPLOADS.mkdir(parents=True, exist_ok=True)
+crm_store, _SCHEMA, _DATA = prepare("ak-crm")
 
 import server  # noqa: E402
 
@@ -229,11 +216,11 @@ def test_catalog_price_is_server_truth():
     server.delete_order(custom["id"])
 
 
-def test_products_sqlite_roundtrip():
+def test_products_pg_roundtrip():
     probe_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
     probe = {
         "id": "testprod01",
-        "name": "SQLite Probe",
+        "name": "PG Probe",
         "price": 100,
         "currency": "kzt",
         "kind": "product",
@@ -280,7 +267,72 @@ def test_products_sqlite_roundtrip():
     )
 
 
-def test_settings_in_sqlite():
+def test_products_json_migration_does_not_resurrect():
+    """Empty catalog + leftover products.json.migrated must NOT re-import."""
+    zombie = [
+        {
+            "id": "zombie01",
+            "name": "Zombie Product",
+            "price": 1,
+            "currency": "kzt",
+            "kind": "product",
+            "description": "should not come back",
+            "image": "assets/products/zombie01.png",
+        }
+    ]
+    crm_store.PRODUCTS_MIGRATED.write_text(
+        json.dumps(zombie, ensure_ascii=False), encoding="utf-8"
+    )
+    if crm_store.PRODUCTS_FILE.is_file():
+        crm_store.PRODUCTS_FILE.unlink()
+
+    with crm_store.DB_WRITE_LOCK:
+        conn = crm_store.db_connect()
+        try:
+            conn.execute("DELETE FROM products")
+            conn.execute(
+                "DELETE FROM settings WHERE key = ?", ("products_json_migrated",)
+            )
+            conn.commit()
+            first = crm_store.migrate_products_from_json(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+    assert_eq(first, 1, "first migrate imports zombie once")
+    assert_eq(len(server.load_products()), 1, "catalog has zombie after first migrate")
+    assert_eq(
+        crm_store.PRODUCTS_MIGRATED.read_text(encoding="utf-8").strip(),
+        "[]",
+        "legacy JSON neutralized after import",
+    )
+
+    server.delete_product("zombie01")
+    assert_eq(len(server.load_products()), 0, "catalog empty after delete")
+
+    # Simulate old deploy that left the landmine file behind again.
+    crm_store.PRODUCTS_MIGRATED.write_text(
+        json.dumps(zombie, ensure_ascii=False), encoding="utf-8"
+    )
+
+    with crm_store.DB_WRITE_LOCK:
+        conn = crm_store.db_connect()
+        try:
+            second = crm_store.migrate_products_from_json(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+    assert_eq(second, 0, "second migrate skipped by flag")
+    assert_eq(len(server.load_products()), 0, "deleted product stays gone")
+    assert_eq(
+        crm_store.PRODUCTS_MIGRATED.read_text(encoding="utf-8").strip(),
+        "[]",
+        "landmine wiped again while flag is set",
+    )
+
+
+def test_settings_in_postgres():
     from crm_store import load_admin_config_from_db, set_admin_password_hash
 
     probe_hash = server.hash_admin_password("probe-pass")
@@ -295,7 +347,7 @@ def test_settings_in_sqlite():
     server._ADMIN_PASSWORD_HASH = None
     server.ensure_admin_credentials()
     health = server.health_status()
-    assert_eq(health.get("storage"), "sqlite", "health storage")
+    assert_eq(health.get("storage"), "postgresql", "health storage")
     assert_true(health.get("settings", 0) >= 1, "health settings count")
 
 
@@ -578,8 +630,12 @@ def main():
         ("clean_order_price_rejects_non_finite", test_clean_order_price_rejects_non_finite),
         ("client_ip_trusts_proxy_headers", test_client_ip_trusts_proxy_headers),
         ("catalog_price_is_server_truth", test_catalog_price_is_server_truth),
-        ("products_sqlite_roundtrip", test_products_sqlite_roundtrip),
-        ("settings_in_sqlite", test_settings_in_sqlite),
+        ("products_pg_roundtrip", test_products_pg_roundtrip),
+        (
+            "products_json_migration_does_not_resurrect",
+            test_products_json_migration_does_not_resurrect,
+        ),
+        ("settings_in_postgres", test_settings_in_postgres),
         ("order_idempotency_and_dedupe", test_order_idempotency_and_dedupe),
         ("order_lifecycle", test_order_lifecycle),
         ("list_clients_legacy_message", test_list_clients_legacy_message),

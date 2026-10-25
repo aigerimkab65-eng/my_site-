@@ -12,6 +12,8 @@ export const SERVICE_PRICES_KZT = {
   "design.card": 10000,
   "design.info": 10000,
   "design.pack": 35000,
+  "sites.card": 50000,
+  "sites.landing": 100000,
 };
 
 /** Approximate FX for display only (not for billing). ~540₸/$ and ~5.5₸/₽. */

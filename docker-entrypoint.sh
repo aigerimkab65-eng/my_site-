@@ -2,7 +2,8 @@
 set -eu
 
 # Bind-mounted ./data may be owned by the host user. Ensure the app user can write
-# CRM DB, WAL files, and backups (critical on Linux VPS; no-op when already ok).
+# CRM backups and uploads (critical on Linux VPS; no-op when already ok).
+# Primary CRM data lives in the Postgres volume, not under ./data.
 mkdir -p /app/data/backups /app/data/uploads /app/assets/products
 
 if [ "$(id -u)" = "0" ]; then

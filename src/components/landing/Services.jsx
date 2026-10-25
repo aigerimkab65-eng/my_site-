@@ -61,18 +61,39 @@ const DESIGN_SERVICES = [
   },
 ];
 
+const SITE_SERVICES = [
+  {
+    id: "sites.card",
+    titleKey: "services.sites.card.title",
+    textKey: "services.sites.card.text",
+  },
+  {
+    id: "sites.landing",
+    titleKey: "services.sites.landing.title",
+    textKey: "services.sites.landing.text",
+  },
+  {
+    id: "sites.other",
+    titleKey: "services.sites.other.title",
+    textKey: "services.sites.other.text",
+    priceLabelKey: "services.sites.other.price",
+  },
+];
+
 function ServiceCard({ service, currency, onOpenLead, visitorId }) {
   const { t, lang } = useI18n();
   const title = t(service.titleKey);
   const message = service.messageKey
     ? t(service.messageKey)
     : t("services.waOrder").replace("{name}", title);
-  const price = formatServicePrice(
-    SERVICE_PRICES_KZT[service.id],
-    currency,
-    lang,
-    t("services.price.from")
-  );
+  const price = service.priceLabelKey
+    ? t(service.priceLabelKey)
+    : formatServicePrice(
+        SERVICE_PRICES_KZT[service.id],
+        currency,
+        lang,
+        t("services.price.from")
+      );
 
   function handleOrder() {
     onOpenLead?.(
@@ -224,6 +245,23 @@ export default function Services({ onOpenLead, visitorId }) {
                 />
               ))}
             </div>
+          </div>
+
+          <div className="service-cat">
+            <h3 className="service-cat-title">{t("services.sites.title")}</h3>
+            <p className="service-cat-intro">{t("services.sites.intro")}</p>
+            <div className="service-grid">
+              {SITE_SERVICES.map((service) => (
+                <ServiceCard
+                  key={service.id}
+                  service={service}
+                  currency={currency}
+                  onOpenLead={onOpenLead}
+                  visitorId={visitorId}
+                />
+              ))}
+            </div>
+            <p className="service-cat-footer">{t("services.sites.footer")}</p>
           </div>
 
           <div className="service-cta">

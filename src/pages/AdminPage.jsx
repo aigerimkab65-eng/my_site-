@@ -296,6 +296,63 @@ export default function AdminPage() {
     }
   }
 
+  /** Opening a new order marks it read (new → in_progress) so the «Новые» badge goes away. */
+  const markOrderSeen = useCallback(
+    async (order) => {
+      if (!order?.id) return;
+      if ((order.status || "new") !== "new") return;
+
+      setOrders((prev) =>
+        prev.map((item) =>
+          item.id === order.id ? { ...item, status: "in_progress" } : item
+        )
+      );
+      setEditingOrder((prev) =>
+        prev && prev.id === order.id ? { ...prev, status: "in_progress" } : prev
+      );
+      setOrderStats((prev) => {
+        if (!prev || typeof prev !== "object") return prev;
+        const byStatus = { ...(prev.byStatus || {}) };
+        byStatus.new = Math.max(0, (byStatus.new || 0) - 1);
+        byStatus.in_progress = (byStatus.in_progress || 0) + 1;
+        return { ...prev, byStatus };
+      });
+
+      try {
+        await adminApi(
+          "/api/orders/" + order.id,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "in_progress" }),
+          },
+          localizeError
+        );
+        await Promise.all([loadOrders(), loadClients()]);
+        setPanelError("");
+      } catch (error) {
+        if (handleAuthError(error, "markOrderSeen")) return;
+        setPanelError(error.message);
+        try {
+          await loadOrders();
+        } catch (_) {
+          // ignore secondary load failure
+        }
+      }
+    },
+    [handleAuthError, localizeError, loadOrders, loadClients]
+  );
+
+  const handleOpenOrder = useCallback(
+    (order) => {
+      if (!order) return;
+      const wasNew = (order.status || "new") === "new";
+      setEditingOrder(wasNew ? { ...order, status: "in_progress" } : order);
+      if (wasNew) markOrderSeen(order);
+    },
+    [markOrderSeen]
+  );
+
   async function handleRetryPanel() {
     try {
       await loadPanelData();
@@ -414,7 +471,9 @@ export default function AdminPage() {
               onFilterChange={handleFilterChange}
               onRefresh={handleRefreshOrders}
               onLogout={handleLogout}
-              onOpenOrder={setEditingOrder}
+              onOpenOrder={handleOpenOrder}
+              onMarkSeen={markOrderSeen}
+              onOrdersChanged={handleOrdersChanged}
               refreshing={refreshingOrders}
               loggingOut={loggingOut}
               hidden={tab !== "orders"}
@@ -438,6 +497,9 @@ export default function AdminPage() {
             <Products
               products={products}
               onRefresh={handleRefreshProducts}
+              onDeleted={(id) =>
+                setProducts((prev) => prev.filter((item) => item.id !== id))
+              }
               refreshing={refreshingProducts}
               hidden={tab !== "products"}
             />

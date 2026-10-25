@@ -40,7 +40,7 @@ RUN mkdir -p /app/data/uploads /app/data/backups /app/assets/products \
     && chown -R app:app /app \
     && chmod 755 /docker-entrypoint.sh
 
-# Entrypoint starts as root only to fix volume ownership, then drops to uid 10001.
+# Entrypoint starts as root only to fix volume ownership (backups/uploads), then drops to uid 10001.
 EXPOSE 8765
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

@@ -27,6 +27,34 @@ def previous_service(messages):
     return None
 
 
+def prefer_local_price_reply(text: str) -> bool:
+    """Use deterministic local replies for catalog chips and website questions.
+
+    OpenAI sometimes answers "хочу сайт" without the public starting prices.
+    """
+    cleaned = normalize_user_text(text)
+    if not cleaned:
+        return False
+    if detect_service(cleaned):
+        return True
+    return contains_any(
+        cleaned,
+        (
+            "сайт",
+            "website",
+            "websites",
+            "landing",
+            "лендинг",
+            "визитк",
+            "business-card site",
+            "business card site",
+            "интернет-магазин",
+            "online store",
+            "internet store",
+        ),
+    )
+
+
 def is_price_followup(text):
     cleaned = text.strip()
     return contains_any(
@@ -103,7 +131,26 @@ def local_attachment_reply(messages, lang, attachments):
 
     if matched:
         name = matched["name"][lang]
-        price = format_price_label(int(matched["price_kzt"]))
+        raw_price = matched.get("price_kzt")
+        if raw_price is None:
+            if lang == "en":
+                return (
+                    f"I received your file(s): {file_list}. "
+                    f"This looks closest to {name} — the quote is individual. "
+                    "Tell me the goal, and I will confirm the format."
+                )
+            if lang == "kz":
+                return (
+                    f"Файл(дар)ыңызды алдым: {file_list}. "
+                    f"Мазмұны бойынша ең жақын қызмет — {name}, бағасы жеке есеп. "
+                    "Мақсатыңызды жазыңыз, форматты нақтылаймын."
+                )
+            return (
+                f"Получила ваши файлы: {file_list}. "
+                f"По содержимому ближе всего «{name}» — цена по индивидуальному расчёту. "
+                "Опишите задачу, и я подтвержу формат."
+            )
+        price = format_price_label(int(raw_price))
         if lang == "en":
             return (
                 f"I received your file(s): {file_list}. "
@@ -296,7 +343,23 @@ def local_consultant_reply(messages, lang):
 
     def service_price_reply(service):
         name = service["name"][lang]
-        price = format_price_label(int(service["price_kzt"]))
+        raw_price = service.get("price_kzt")
+        if raw_price is None:
+            if lang == "en":
+                return (
+                    f"{name} is priced individually — there is no fixed public starting price. "
+                    "Share your goal, and I will tell you whether this format fits."
+                )
+            if lang == "kz":
+                return (
+                    f"{name} — жеке есеп, бекітілген бастапқы баға жоқ. "
+                    "Мақсатыңызды айтыңыз — осы формат сізге сай келетінін нақтылаймын."
+                )
+            return (
+                f"«{name}» — индивидуальный расчёт, фиксированной цены «от» нет. "
+                "Опишите задачу — уверенно скажу, подходит ли этот формат."
+            )
+        price = format_price_label(int(raw_price))
         if lang == "en":
             return (
                 f"{name} starts from {price}. "
@@ -373,26 +436,31 @@ def local_consultant_reply(messages, lang):
             f"Напишите в Telegram {CONTACT_TG} или WhatsApp {CONTACT_WA} — там это быстро закрывается."
         )
 
-    if matched and not (wants_contact or wants_process or wants_portfolio or wants_website or wants_list):
+    # Matched catalog services (including websites) always win over the
+    # generic "websites" branch — otherwise "Сайт-визитка" never shows 50 000 ₸.
+    if matched and not (wants_contact or wants_process or wants_portfolio or wants_list):
         return service_price_reply(matched)
 
     if wants_website:
         if lang == "en":
             return (
-                "Yes. Aigerim also creates websites and AI assistants. "
-                "There is no fixed public price for this — the quote is individual. "
-                f"Message her on Telegram {CONTACT_TG} or WhatsApp {CONTACT_WA}, and she will assess the project."
+                "Website services are on the public price list: "
+                "business-card site from 50 000 ₸, landing page from 100 000 ₸; "
+                "stores, corporate, 3D/animated sites and integrations — custom quote. "
+                "Pick a format or describe the task — I will point to the right option."
             )
         if lang == "kz":
             return (
-                "Иә. Айгерим сайттар мен AI-көмекшілерді де жасайды. "
-                "Бұған ашық прайста бекітілген баға жоқ — құны жеке есептеледі. "
-                f"Telegram {CONTACT_TG} немесе WhatsApp {CONTACT_WA} арқылы жазыңыз, ол жобаны бағалайды."
+                "Сайт қызметтері ашық прайста бар: "
+                "сайт-визитка — 50 000 ₸ бастап, лендинг — 100 000 ₸ бастап; "
+                "дүкен, корпоративтік, 3D/анимациялық сайттар мен интеграциялар — жеке есеп. "
+                "Форматты таңдаңыз немесе міндетті жазыңыз — сәйкес нұсқаны айтамын."
             )
         return (
-            "Да. Айгерим также делает сайты и AI-помощников. "
-            "В открытом прайсе фиксированной цены нет — расчёт индивидуальный. "
-            f"Напишите ей в Telegram {CONTACT_TG} или WhatsApp {CONTACT_WA}, и она оценит проект."
+            "Услуги по сайтам есть в открытом прайсе: "
+            "сайт-визитка — от 50 000 ₸, лендинг — от 100 000 ₸; "
+            "магазины, корпоративные, 3D/анимационные сайты и интеграции — индивидуальный расчёт. "
+            "Выберите формат или опишите задачу — подскажу подходящий вариант."
         )
 
     if wants_process:

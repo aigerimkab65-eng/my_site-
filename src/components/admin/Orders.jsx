@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { useI18n } from "../../i18n/I18nContext.jsx";
+import { adminApi } from "../../lib/adminApi.js";
 import {
   formatDate,
   formatPrice,
@@ -45,20 +47,65 @@ function CrmStats({ stats }) {
   );
 }
 
-function OrderRow({ order, onOpen }) {
-  const { t, lang } = useI18n();
+function OrderRow({ order, onOpen, onMarkSeen, onChanged }) {
+  const { t, lang, localizeError } = useI18n();
+  const [busy, setBusy] = useState("");
   const name = getOrderClientName(order);
   const phone = getOrderClientPhone(order);
   const clientLabel = [name, phone].filter(Boolean).join(" · ");
   const titleText = clientLabel || order.serviceName || t("admin.orderUntitled");
+  const status = order.status || "new";
+  const isNew = status === "new";
+  const isAnswered = status === "done";
 
   function handleWa(event) {
     event.preventDefault();
+    // Opening WhatsApp counts as seeing the lead — drop «Новые».
+    if (isNew) onMarkSeen?.(order);
     openOrderWhatsApp(order, t);
   }
 
+  async function setStatus(nextStatus) {
+    if (!order?.id || busy) return;
+    setBusy("status");
+    try {
+      await adminApi(
+        "/api/orders/" + order.id,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: nextStatus }),
+        },
+        localizeError
+      );
+      await onChanged?.();
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleDelete() {
+    if (!order?.id || busy) return;
+    if (!confirm(t("admin.confirmDeleteOrder"))) return;
+    setBusy("delete");
+    try {
+      await adminApi(
+        "/api/orders/" + order.id,
+        { method: "DELETE" },
+        localizeError
+      );
+      await onChanged?.();
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
   return (
-    <article className={`crm-item status-${order.status || "new"}`}>
+    <article className={`crm-item status-${status}`}>
       <div className="crm-item-top">
         {phone ? (
           <button
@@ -72,7 +119,9 @@ function OrderRow({ order, onOpen }) {
         ) : (
           <strong>{titleText}</strong>
         )}
-        <span className="crm-badge">{statusLabel(order.status, t)}</span>
+        {isNew ? (
+          <span className="crm-badge">{statusLabel(status, t)}</span>
+        ) : null}
       </div>
       <p className="crm-item-meta">
         {[
@@ -91,6 +140,24 @@ function OrderRow({ order, onOpen }) {
         <button type="button" className="text-link" onClick={handleWa}>
           WhatsApp
         </button>
+        {!isAnswered ? (
+          <button
+            type="button"
+            className="text-link"
+            disabled={Boolean(busy)}
+            onClick={() => setStatus("done")}
+          >
+            {t("admin.markAnswered")}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="text-link admin-delete"
+          disabled={Boolean(busy)}
+          onClick={handleDelete}
+        >
+          {busy === "delete" ? t("admin.deleting") : t("admin.delete")}
+        </button>
       </div>
     </article>
   );
@@ -104,6 +171,8 @@ export default function Orders({
   onRefresh,
   onLogout,
   onOpenOrder,
+  onMarkSeen,
+  onOrdersChanged,
   refreshing,
   loggingOut,
   hidden,
@@ -161,7 +230,13 @@ export default function Orders({
           <p className="shop-empty">{t("admin.ordersEmpty")}</p>
         ) : (
           orders.map((order) => (
-            <OrderRow key={order.id} order={order} onOpen={onOpenOrder} />
+            <OrderRow
+              key={order.id}
+              order={order}
+              onOpen={onOpenOrder}
+              onMarkSeen={onMarkSeen}
+              onChanged={onOrdersChanged}
+            />
           ))
         )}
       </div>

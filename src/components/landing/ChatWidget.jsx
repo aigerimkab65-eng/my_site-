@@ -47,6 +47,9 @@ const CHAT_SUGGEST_KEYS = [
   "services.design.card.title",
   "services.design.info.title",
   "services.design.pack.title",
+  "services.sites.card.title",
+  "services.sites.landing.title",
+  "services.sites.other.title",
 ];
 
 function chatWidthLimits() {

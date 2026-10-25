@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
-"""Единое SQLite-хранилище CRM: заказы, клиенты, товары, настройки, фото."""
+"""Единое PostgreSQL-хранилище CRM: заказы, клиенты, товары, настройки, фото.
+
+Публичный API совместим с прежним SQLite-слоем: placeholders `?`,
+`INSERT OR IGNORE`, dict-подобные строки. Подключение через DATABASE_URL.
+"""
 
 from __future__ import annotations
 
 import json
 import mimetypes
+import os
+import re
 import secrets
 import sqlite3
 import threading
 import time
 from pathlib import Path
+
+import psycopg
+from psycopg import IntegrityError  # noqa: F401 — re-exported for server/tests
+from psycopg import sql as psql
+from psycopg.rows import dict_row
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -17,10 +28,11 @@ UPLOADS = ROOT / "assets" / "products"
 PRODUCTS_FILE = DATA / "products.json"
 PRODUCTS_MIGRATED = DATA / "products.json.migrated"
 CONFIG_FILE = DATA / "config.json"
+# Legacy path (SQLite). Kept for migration scripts and docs.
 ORDERS_DB = DATA / "crm.db"
 BACKUPS_DIR = DATA / "backups"
 
-# Serializes writers only. Readers use their own SQLite connections (WAL-safe).
+# Serializes writers. Readers open their own connections.
 DB_WRITE_LOCK = threading.Lock()
 DB_LOCK = DB_WRITE_LOCK  # back-compat alias
 
@@ -33,21 +45,173 @@ EXT_MIME = {
     ".gif": "image/gif",
 }
 
+_INSERT_OR_IGNORE = re.compile(r"INSERT\s+OR\s+IGNORE\s+INTO", re.IGNORECASE)
+_NAMED_PARAM = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _load_dotenv():
+    env_path = ROOT / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def database_url():
+    _load_dotenv()
+    url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL не задан. Пример: "
+            "postgresql://aigerim:PASSWORD@127.0.0.1:5432/aigerim_crm"
+        )
+    return url
+
+
+def database_label():
+    """Short label for logs (no password)."""
+    try:
+        url = database_url()
+    except RuntimeError:
+        return "(DATABASE_URL unset)"
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        host = parsed.hostname or "?"
+        port = f":{parsed.port}" if parsed.port else ""
+        db = (parsed.path or "/").lstrip("/") or "?"
+        schema = (os.environ.get("CRM_PG_SCHEMA") or "").strip()
+        extra = f" schema={schema}" if schema else ""
+        return f"postgresql://{host}{port}/{db}{extra}"
+    except Exception:
+        return "postgresql"
+
+
+def adapt_sql(sql: str) -> str:
+    """Translate SQLite-flavoured SQL to PostgreSQL."""
+    ignore = bool(_INSERT_OR_IGNORE.search(sql))
+    if ignore:
+        sql = _INSERT_OR_IGNORE.sub("INSERT INTO", sql, count=1)
+    sql = _NAMED_PARAM.sub(r"%(\1)s", sql)
+    sql = sql.replace("?", "%s")
+    if ignore:
+        sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+    return sql
+
+
+class PgConnection:
+    """Thin wrapper: sqlite3-like execute/commit/close with `?` placeholders."""
+
+    def __init__(self, raw: psycopg.Connection):
+        self._raw = raw
+
+    def execute(self, sql, params=None):
+        adapted = adapt_sql(sql)
+        if params is None:
+            return self._raw.execute(adapted)
+        if isinstance(params, dict):
+            return self._raw.execute(adapted, params)
+        return self._raw.execute(adapted, tuple(params))
+
+    def commit(self):
+        self._raw.commit()
+
+    def rollback(self):
+        self._raw.rollback()
+
+    def close(self):
+        self._raw.close()
+
+    @property
+    def raw(self):
+        return self._raw
+
 
 def db_connect():
     DATA.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(ORDERS_DB), timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA temp_store=MEMORY")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    conn = psycopg.connect(database_url(), row_factory=dict_row)
+    schema = (os.environ.get("CRM_PG_SCHEMA") or "").strip()
+    if schema:
+        if not _IDENT.match(schema):
+            conn.close()
+            raise ValueError(f"invalid CRM_PG_SCHEMA: {schema!r}")
+        conn.execute(
+            psql.SQL("SET search_path TO {}, public").format(
+                psql.Identifier(schema)
+            )
+        )
+        conn.commit()
+    return PgConnection(conn)
+
+
+def ensure_test_schema(schema: str | None = None) -> str:
+    """Create an isolated schema for tests; sets CRM_PG_SCHEMA."""
+    schema = schema or f"t_{secrets.token_hex(6)}"
+    if not _IDENT.match(schema):
+        raise ValueError(f"invalid schema name: {schema!r}")
+    os.environ["CRM_PG_SCHEMA"] = schema
+    conn = psycopg.connect(database_url(), row_factory=dict_row)
+    try:
+        conn.execute(
+            psql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                psql.Identifier(schema)
+            )
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return schema
+
+
+def drop_test_schema(schema: str | None = None):
+    schema = (schema or os.environ.get("CRM_PG_SCHEMA") or "").strip()
+    if not schema or not _IDENT.match(schema):
+        return
+    conn = psycopg.connect(database_url(), row_factory=dict_row)
+    try:
+        conn.execute(
+            psql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                psql.Identifier(schema)
+            )
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _table_cols(conn, table):
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    rows = conn.execute(
+        """
+        SELECT column_name AS name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = ?
+        """,
+        (table,),
+    ).fetchall()
+    return {row["name"] for row in rows}
+
+
+def _table_names(conn):
+    rows = conn.execute(
+        """
+        SELECT table_name AS name
+        FROM information_schema.tables
+        WHERE table_schema = current_schema()
+          AND table_type = 'BASE TABLE'
+        """
+    ).fetchall()
+    return {row["name"] for row in rows}
 
 
 def ensure_order_columns(conn):
@@ -65,7 +229,7 @@ def ensure_order_columns(conn):
 def ensure_product_image_columns(conn):
     cols = _table_cols(conn, "products")
     if "image_blob" not in cols:
-        conn.execute("ALTER TABLE products ADD COLUMN image_blob BLOB")
+        conn.execute("ALTER TABLE products ADD COLUMN image_blob BYTEA")
     if "image_mime" not in cols:
         conn.execute(
             "ALTER TABLE products ADD COLUMN image_mime TEXT NOT NULL DEFAULT ''"
@@ -99,17 +263,56 @@ def product_price_to_db(price):
     return float(price)
 
 
+def neutralize_legacy_product_json_files():
+    """Wipe legacy JSON catalogs so deleted DB rows cannot be resurrected.
+
+    products.json / products.json.migrated are one-shot migration sources only.
+    Keeping product payloads on disk after import used to bring Audit Product
+    back whenever the DB catalog was empty and the migration flag was missing.
+    """
+    for path in (PRODUCTS_FILE, PRODUCTS_MIGRATED):
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except OSError as error:
+            print(f"[crm] could not read legacy {path.name}: {error}")
+            continue
+        if raw in ("", "[]"):
+            continue
+        try:
+            path.write_text("[]\n", encoding="utf-8")
+            print(f"[crm] neutralized legacy {path.name}")
+        except OSError as error:
+            print(f"[crm] could not neutralize {path.name}: {error}")
+
+
 def migrate_products_from_json(conn):
-    """One-shot import of legacy data/products.json (or .migrated) into SQLite."""
+    """One-shot import of legacy data/products.json (or .migrated) into DB.
+
+    Must never re-run after the first migration: an empty catalog (user deleted
+    every product) used to re-import Audit Product from products.json.migrated
+    on every container restart.
+    """
+    if get_setting(conn, "products_json_migrated") == "1":
+        neutralize_legacy_product_json_files()
+        return 0
+
     count = conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"]
     if count:
+        # Live catalog already exists — mark done so an empty catalog later
+        # does not resurrect rows from the legacy JSON file.
+        set_setting(conn, "products_json_migrated", "1")
+        neutralize_legacy_product_json_files()
         return 0
+
     sources = []
     if PRODUCTS_FILE.is_file():
         sources.append(PRODUCTS_FILE)
     if PRODUCTS_MIGRATED.is_file():
         sources.append(PRODUCTS_MIGRATED)
     if not sources:
+        set_setting(conn, "products_json_migrated", "1")
         return 0
 
     items = None
@@ -125,6 +328,8 @@ def migrate_products_from_json(conn):
             used = path
             break
     if not items:
+        set_setting(conn, "products_json_migrated", "1")
+        neutralize_legacy_product_json_files()
         return 0
 
     now = time.time()
@@ -160,9 +365,14 @@ def migrate_products_from_json(conn):
             PRODUCTS_FILE.replace(migrated)
             print(f"[crm] products migrated {PRODUCTS_FILE.name} → {migrated.name}")
         except OSError as error:
-            print(f"[crm] products in SQLite; rename failed: {error}")
+            print(f"[crm] products in PostgreSQL; rename failed: {error}")
     else:
         print(f"[crm] products restored from {used.name} ({inserted} rows)")
+
+    set_setting(conn, "products_json_migrated", "1")
+    # Always wipe payloads after import — flag alone is not enough if someone
+    # clears settings or restores an old volume with the JSON still present.
+    neutralize_legacy_product_json_files()
     return inserted
 
 
@@ -241,14 +451,18 @@ def migrate_product_images_from_disk(conn):
             except OSError:
                 continue
     if moved:
-        print(f"[crm] product images → SQLite blobs: {moved}")
+        print(f"[crm] product images → PostgreSQL bytea: {moved}")
     return moved
+
+
+def _sqlite_table_cols(conn, table):
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def _copy_orders_from(src_conn, dst_conn):
     # Never ALTER the source (backups open read-only).
     ensure_order_columns(dst_conn)
-    src_cols = _table_cols(src_conn, "orders")
+    src_cols = _sqlite_table_cols(src_conn, "orders")
     needed = [
         "id",
         "created_at",
@@ -302,7 +516,7 @@ def _copy_orders_from(src_conn, dst_conn):
             """,
             values,
         )
-        inserted += cur.rowcount
+        inserted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     return inserted
 
 
@@ -340,7 +554,6 @@ def _copy_clients_from(src_conn, dst_conn):
             )
             inserted += 1
             continue
-        # Keep newer / richer client metadata from backups.
         if float(row["updated_at"] or 0) > float(existing["updated_at"] or 0):
             dst_conn.execute(
                 """
@@ -384,7 +597,7 @@ def _copy_products_from(src_conn, dst_conn):
     }:
         return 0
     ensure_product_image_columns(dst_conn)
-    src_cols = _table_cols(src_conn, "products")
+    src_cols = _sqlite_table_cols(src_conn, "products")
     has_blob = "image_blob" in src_cols
     rows = src_conn.execute("SELECT * FROM products").fetchall()
     changed = 0
@@ -394,6 +607,8 @@ def _copy_products_from(src_conn, dst_conn):
             "SELECT id, image_blob FROM products WHERE id = ?", (row["id"],)
         ).fetchone()
         blob = row["image_blob"] if has_blob and "image_blob" in keys else None
+        if blob is not None:
+            blob = bytes(blob)
         mime = (row["image_mime"] if has_blob and "image_mime" in keys else "") or ""
         if exists is None:
             dst_conn.execute(
@@ -439,7 +654,7 @@ def _copy_products_from(src_conn, dst_conn):
 
 
 def merge_from_backups(conn, force=False):
-    """Restore any rows present in data/backups/*.db but missing from live DB."""
+    """Restore any rows present in data/backups/*.db (legacy SQLite) but missing."""
     if not force and get_setting(conn, "legacy_backups_merged") == "1":
         return {"orders": 0, "clients": 0, "products": 0}
     if not BACKUPS_DIR.is_dir():
@@ -450,8 +665,7 @@ def merge_from_backups(conn, force=False):
     files = sorted(BACKUPS_DIR.glob("crm-*.db"))
     for path in files:
         try:
-            src = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
-            src.row_factory = sqlite3.Row
+            src = _open_sqlite_readonly(path)
             try:
                 totals["orders"] += _copy_orders_from(src, conn)
                 totals["clients"] += _copy_clients_from(src, conn)
@@ -463,10 +677,135 @@ def merge_from_backups(conn, force=False):
     set_setting(conn, "legacy_backups_merged", "1")
     if any(totals.values()):
         print(
-            "[crm] merged from backups: "
+            "[crm] merged from SQLite backups: "
             f"orders+{totals['orders']}, clients~{totals['clients']}, "
             f"products~{totals['products']}"
         )
+    return totals
+
+
+def _open_sqlite_readonly(path: Path):
+    """Open SQLite for reading. WAL live DBs may need a short RW open first."""
+    path = Path(path).resolve()
+    try:
+        # Flush WAL into the main file when we have write access.
+        tmp = sqlite3.connect(str(path), timeout=30)
+        try:
+            tmp.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            tmp.commit()
+        finally:
+            tmp.close()
+    except sqlite3.Error:
+        pass
+    try:
+        conn = sqlite3.connect(
+            f"file:{path.as_posix()}?mode=ro", uri=True, timeout=30
+        )
+    except sqlite3.Error:
+        # Fallback: normal open (read queries only).
+        conn = sqlite3.connect(str(path), timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def migrate_from_sqlite_file(sqlite_path=None, conn=None):
+    """Copy all rows from a SQLite crm.db into the current PostgreSQL schema."""
+    path = Path(sqlite_path) if sqlite_path else ORDERS_DB
+    if not path.is_file():
+        return {"orders": 0, "clients": 0, "products": 0, "settings": 0,
+                "order_idempotency": 0, "admin_sessions": 0}
+
+    own_conn = conn is None
+    if own_conn:
+        conn = db_connect()
+    totals = {
+        "orders": 0,
+        "clients": 0,
+        "products": 0,
+        "settings": 0,
+        "order_idempotency": 0,
+        "admin_sessions": 0,
+    }
+    src = _open_sqlite_readonly(path)
+    try:
+        init_schema(conn)
+        totals["orders"] = _copy_orders_from(src, conn)
+        totals["clients"] = _copy_clients_from(src, conn)
+        totals["products"] = _copy_products_from(src, conn)
+
+        src_tables = {
+            r[0] for r in src.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "settings" in src_tables:
+            for row in src.execute(
+                "SELECT key, value, updated_at FROM settings"
+            ).fetchall():
+                # Never import legacy plaintext passwords.
+                if row["key"] in {"admin_password", "password"}:
+                    continue
+                existing = conn.execute(
+                    "SELECT key FROM settings WHERE key = ?", (row["key"],)
+                ).fetchone()
+                if existing is None:
+                    conn.execute(
+                        """
+                        INSERT INTO settings (key, value, updated_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (row["key"], row["value"], float(row["updated_at"] or 0)),
+                    )
+                    totals["settings"] += 1
+
+        if "order_idempotency" in src_tables:
+            for row in src.execute(
+                "SELECT key, order_id, created_at FROM order_idempotency"
+            ).fetchall():
+                # Only if order exists (FK).
+                order = conn.execute(
+                    "SELECT id FROM orders WHERE id = ?", (row["order_id"],)
+                ).fetchone()
+                if not order:
+                    continue
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO order_idempotency (key, order_id, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (row["key"], row["order_id"], float(row["created_at"] or 0)),
+                )
+                if cur.rowcount and cur.rowcount > 0:
+                    totals["order_idempotency"] += 1
+
+        if "admin_sessions" in src_tables:
+            for row in src.execute(
+                "SELECT token, csrf_token, created_at, last_seen_at, expires_at "
+                "FROM admin_sessions"
+            ).fetchall():
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO admin_sessions
+                        (token, csrf_token, created_at, last_seen_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["token"],
+                        row["csrf_token"],
+                        float(row["created_at"] or 0),
+                        float(row["last_seen_at"] or 0),
+                        float(row["expires_at"] or 0),
+                    ),
+                )
+                if cur.rowcount and cur.rowcount > 0:
+                    totals["admin_sessions"] += 1
+
+        if own_conn:
+            conn.commit()
+    finally:
+        src.close()
+        if own_conn:
+            conn.close()
     return totals
 
 
@@ -475,13 +814,13 @@ def init_schema(conn):
         """
         CREATE TABLE IF NOT EXISTS orders (
             id TEXT PRIMARY KEY,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL,
+            created_at DOUBLE PRECISION NOT NULL,
+            updated_at DOUBLE PRECISION NOT NULL,
             source TEXT NOT NULL,
             service_id TEXT NOT NULL DEFAULT '',
             service_name TEXT NOT NULL DEFAULT '',
             message TEXT NOT NULL DEFAULT '',
-            price_from REAL,
+            price_from DOUBLE PRECISION,
             currency TEXT NOT NULL DEFAULT 'kzt',
             lang TEXT NOT NULL DEFAULT 'ru',
             status TEXT NOT NULL DEFAULT 'new',
@@ -502,7 +841,7 @@ def init_schema(conn):
             name TEXT NOT NULL DEFAULT '',
             note TEXT NOT NULL DEFAULT '',
             hidden INTEGER NOT NULL DEFAULT 0,
-            updated_at REAL NOT NULL
+            updated_at DOUBLE PRECISION NOT NULL
         )
         """
     )
@@ -511,15 +850,15 @@ def init_schema(conn):
         CREATE TABLE IF NOT EXISTS products (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
-            price REAL,
+            price DOUBLE PRECISION,
             currency TEXT NOT NULL DEFAULT 'kzt',
             kind TEXT NOT NULL DEFAULT 'product',
             description TEXT NOT NULL DEFAULT '',
             image TEXT NOT NULL DEFAULT '',
-            image_blob BLOB,
+            image_blob BYTEA,
             image_mime TEXT NOT NULL DEFAULT '',
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
+            created_at DOUBLE PRECISION NOT NULL,
+            updated_at DOUBLE PRECISION NOT NULL
         )
         """
     )
@@ -529,7 +868,7 @@ def init_schema(conn):
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
-            updated_at REAL NOT NULL
+            updated_at DOUBLE PRECISION NOT NULL
         )
         """
     )
@@ -554,13 +893,12 @@ def init_schema(conn):
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_products_kind ON products(kind)"
     )
-    # Idempotency keys: same key → same order (retry-safe creates).
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS order_idempotency (
             key TEXT PRIMARY KEY,
             order_id TEXT NOT NULL UNIQUE,
-            created_at REAL NOT NULL,
+            created_at DOUBLE PRECISION NOT NULL,
             FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
         )
         """
@@ -578,9 +916,9 @@ def init_schema(conn):
         CREATE TABLE IF NOT EXISTS admin_sessions (
             token TEXT PRIMARY KEY,
             csrf_token TEXT NOT NULL,
-            created_at REAL NOT NULL,
-            last_seen_at REAL NOT NULL,
-            expires_at REAL NOT NULL
+            created_at DOUBLE PRECISION NOT NULL,
+            last_seen_at DOUBLE PRECISION NOT NULL,
+            expires_at DOUBLE PRECISION NOT NULL
         )
         """
     )
@@ -710,13 +1048,27 @@ def prune_expired_admin_sessions():
 
 
 def init_crm_db():
-    """Create schema and migrate all legacy file-based data into SQLite."""
+    """Create schema and migrate all legacy file-based data into PostgreSQL."""
     with DB_WRITE_LOCK:
         conn = db_connect()
         try:
             init_schema(conn)
+            # One-shot: live SQLite file → PostgreSQL (if PG still empty of orders).
+            orders_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM orders"
+            ).fetchone()["c"]
+            if orders_count == 0 and ORDERS_DB.is_file():
+                if get_setting(conn, "sqlite_migrated") != "1":
+                    totals = migrate_from_sqlite_file(ORDERS_DB, conn=conn)
+                    set_setting(conn, "sqlite_migrated", "1")
+                    if any(totals.values()):
+                        print(
+                            "[crm] migrated from SQLite crm.db: "
+                            + ", ".join(f"{k}+{v}" for k, v in totals.items() if v)
+                        )
             migrate_config_from_json(conn)
             migrate_products_from_json(conn)
+            neutralize_legacy_product_json_files()
             migrate_product_images_from_disk(conn)
             merge_from_backups(conn)
             conn.commit()
@@ -765,7 +1117,7 @@ def save_admin_config_to_db(password_hash, secret=None):
 
 
 def get_product_image_bytes(product_id):
-    """Return (bytes, mime) for a product image stored in SQLite, or None."""
+    """Return (bytes, mime) for a product image stored in DB, or None."""
     product_id = (product_id or "").strip()
     if not product_id:
         return None

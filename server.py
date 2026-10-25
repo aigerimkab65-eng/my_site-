@@ -744,7 +744,10 @@ def create_order(payload):
                 "Индивидуальный проект",
             }:
                 service_name = clean_text(catalog_name, 160) or service_name
-            price_from = clean_order_price(SERVICE_PRICES_KZT[service_id])
+            if service_id in SERVICE_PRICES_KZT:
+                price_from = clean_order_price(SERVICE_PRICES_KZT[service_id])
+            else:
+                price_from = None
             currency = "kzt"
 
     visitor_id = clean_text(payload.get("visitorId"), 80)

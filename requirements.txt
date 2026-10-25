@@ -2,3 +2,4 @@ reportlab>=4.0,<6
 Pillow>=10.0,<12
 pypdf>=4.0,<7
 bcrypt>=4.0,<5
+psycopg[binary]>=3.1,<4
