@@ -3,6 +3,15 @@
 .env.*
 !.env.example
 help.txt
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+*.p12
+*.pfx
+credentials.json
+**/secrets/
+**/credentials/
 
 # Python
 .venv/
@@ -26,6 +35,10 @@ dist/
 .tools/
 
 # CRM data, DB copies, uploads, runtime logs (do not commit PII)
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
 data/*.db
 data/*.db-*
 data/backups/
