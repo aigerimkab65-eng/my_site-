@@ -2776,6 +2776,16 @@ body.modal-open {
   outline: none;
 }
 
+.chat-attach-option:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-attach-option:disabled:hover,
+.chat-attach-option:disabled:focus-visible {
+  background: transparent;
+}
+
 .chat-attach-option-icon {
   width: 22px;
   height: 22px;

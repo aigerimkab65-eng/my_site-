@@ -15,7 +15,10 @@ from ai.tools.catalog import (
 
 
 def previous_service(messages):
+    """Find the last named service in earlier turns (user messages only)."""
     for item in reversed(messages[:-1]):
+        if item.get("role") and item.get("role") != "user":
+            continue
         content = item.get("content", "").lower()
         found = detect_service(content)
         if found:
@@ -81,6 +84,43 @@ def is_price_followup(text):
             cleaned, ("цен", "сколько", "price", "cost", "баға", "қанша", "стоим", "стоит")
         )
     )
+
+
+_PRICE_ASK_FILLER_RE = re.compile(
+    r"(?:"
+    r"\bа\b|\bи\b|\bэто\b|\bто\b|\bже\b|\bпо\b|\bпро\b|\bдля\b|"
+    r"сколько|стоит|стоимост\w*|цен[ауеы]?|прайс|"
+    r"price|cost|how|much|\bit\b|\bis\b|\ba\b|\bthe\b|about|what|"
+    r"баға\w*|\bқанша\b|тұрад\w*|\bал\b"
+    r")",
+    flags=re.IGNORECASE,
+)
+
+
+def residual_after_price_words(text: str) -> str:
+    """Leftover words after stripping price-ask filler.
+
+    Empty residual ≈ bare follow-up ("а сколько?", "цена?").
+    Non-empty residual ≈ a new topic ("сколько стоит дизайн/сайт/баннер").
+    """
+    cleaned = normalize_user_text(text)
+    if not cleaned:
+        return ""
+    residual = _PRICE_ASK_FILLER_RE.sub(" ", cleaned)
+    return re.sub(r"\s+", " ", residual).strip()
+
+
+def is_bare_price_ask(text: str) -> bool:
+    """True when the user only asks for a price, without naming a new topic."""
+    if not is_price_followup(text) and not (
+        len(normalize_user_text(text)) <= 28
+        and contains_any(
+            text.lower(),
+            ("цен", "сколько", "price", "cost", "баға", "қанша", "стоим", "стоит"),
+        )
+    ):
+        return False
+    return not residual_after_price_words(text)
 
 
 def normalize_user_text(value):
@@ -336,9 +376,10 @@ def local_consultant_reply(messages, lang):
     )
 
     matched = detect_service(text)
-    if matched is None and not is_greeting and (
-        is_price_followup(text) or (wants_price and len(text) <= 28)
-    ):
+    # Bare short price asks ("а сколько?", "цена?") reuse the prior service.
+    # If the user already named a new topic ("сколько стоит сделать сайт",
+    # "сколько стоит дизайн"), never drag the previous service forward.
+    if matched is None and not is_greeting and is_bare_price_ask(text):
         matched = previous_service(messages)
 
     def service_price_reply(service):

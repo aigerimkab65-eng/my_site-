@@ -180,9 +180,11 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
   const [busy, setBusy] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [showPriceList, setShowPriceList] = useState(false);
   const [resizing, setResizing] = useState(false);
 
   const messagesRef = useRef(null);
+  const suggestionsRef = useRef(null);
   const inputRef = useRef(null);
   const fileRef = useRef(null);
   const attachWrapRef = useRef(null);
@@ -232,12 +234,20 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
   useEffect(() => {
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [bubbles, open, panelVisible]);
+  }, [bubbles, open, panelVisible, showPriceList]);
 
   const ensureWelcome = useCallback(() => {
     if (startedRef.current) return;
     setBubbles([{ id: "welcome", role: "assistant", text: t("chat.welcome") }]);
+    setShowPriceList(true);
   }, [t]);
+
+  const openPriceList = useCallback(() => {
+    setShowPriceList(true);
+    requestAnimationFrame(() => {
+      suggestionsRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+  }, []);
 
   // Refresh welcome / suggestions on lang change before chat starts
   useEffect(() => {
@@ -246,6 +256,7 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
         setBubbles([
           { id: "welcome", role: "assistant", text: t("chat.welcome") },
         ]);
+        setShowPriceList(true);
       }
     }
   }, [lang, t, started, open]);
@@ -265,10 +276,12 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
       setAttachments([]);
       setInput("");
       setBubbles([]);
+      setShowPriceList(false);
       if (open) {
         setBubbles([
           { id: "welcome", role: "assistant", text: t("chat.welcome") },
         ]);
+        setShowPriceList(true);
       }
     }
     window.addEventListener("pageshow", onPageShow);
@@ -281,6 +294,7 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
         setOpen(true);
         setPanelHidden(false);
         ensureWelcome();
+        setShowPriceList(true);
         requestAnimationFrame(() => {
           setPanelVisible(true);
           inputRef.current?.focus();
@@ -289,6 +303,7 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
       }
       setOpen(false);
       setPanelVisible(false);
+      setAttachMenuOpen(false);
     },
     [ensureWelcome]
   );
@@ -325,10 +340,10 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
   }, [attachMenuOpen]);
 
   useEffect(() => {
-    if (!open || busy || attachments.length >= CHAT_MAX_FILES) {
+    if (!open || busy) {
       setAttachMenuOpen(false);
     }
-  }, [open, busy, attachments.length]);
+  }, [open, busy]);
 
   // Resize handlers
   useEffect(() => {
@@ -466,6 +481,8 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
     busyRef.current = true;
     setStarted(true);
     setBusy(true);
+    setShowPriceList(false);
+    setAttachMenuOpen(false);
     setInput("");
     setAttachments([]);
 
@@ -583,7 +600,7 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
     );
   }
 
-  const showSuggestions = history.length === 0 && !started;
+  const filesFull = attachments.length >= CHAT_MAX_FILES;
 
   return (
     <div className={`chat-widget${open ? " is-open" : ""}`} id="chat-widget">
@@ -634,11 +651,12 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
         </div>
 
         <div
+          ref={suggestionsRef}
           className="chat-suggestions"
           id="chat-suggestions"
-          hidden={!showSuggestions}
+          hidden={!showPriceList}
         >
-          {showSuggestions
+          {showPriceList
             ? CHAT_SUGGEST_KEYS.map((key) => (
                 <button
                   key={key}
@@ -712,7 +730,7 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
                 title={t("chat.attach")}
                 aria-haspopup="menu"
                 aria-expanded={attachMenuOpen}
-                disabled={busy || attachments.length >= CHAT_MAX_FILES}
+                disabled={busy}
                 onClick={() => setAttachMenuOpen((prev) => !prev)}
               >
                 <span aria-hidden="true">+</span>
@@ -729,6 +747,38 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
                     className="chat-attach-option"
                     role="menuitem"
                     onClick={() => {
+                      setAttachMenuOpen(false);
+                      openPriceList();
+                    }}
+                  >
+                    <span className="chat-attach-option-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none">
+                        <path
+                          d="M7 7h10M7 12h10M7 17h6"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                          strokeLinecap="round"
+                        />
+                        <rect
+                          x="4"
+                          y="4"
+                          width="16"
+                          height="16"
+                          rx="2.5"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                        />
+                      </svg>
+                    </span>
+                    {t("chat.priceList")}
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-attach-option"
+                    role="menuitem"
+                    disabled={filesFull}
+                    onClick={() => {
+                      if (filesFull) return;
                       setAttachMenuOpen(false);
                       const input = fileRef.current;
                       if (!input) return;
@@ -763,7 +813,9 @@ export default function ChatWidget({ visitorId, onOpenLead }) {
                     type="button"
                     className="chat-attach-option"
                     role="menuitem"
+                    disabled={filesFull}
                     onClick={() => {
+                      if (filesFull) return;
                       setAttachMenuOpen(false);
                       const input = fileRef.current;
                       if (!input) return;

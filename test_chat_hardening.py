@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 import server  # noqa: E402
 from ai.core.files import is_allowed_chat_attachment  # noqa: E402
+from ai.features.consultant.local import local_consultant_reply  # noqa: E402
 
 
 class TestFailure(Exception):
@@ -95,10 +96,52 @@ def test_attachment_allowlist():
     )
 
 
+def test_website_price_not_overridden_by_prior_service():
+    """Regression: 'сколько стоит сделать сайт' must not reuse AI-фотосессия."""
+    reply = local_consultant_reply(
+        [
+            {"role": "user", "content": "AI-фотосессия"},
+            {"role": "user", "content": "благодарю за ответ"},
+            {"role": "user", "content": "сколько стоит сделать сайт"},
+        ],
+        "ru",
+    )
+    assert_true("сайт-визитка" in reply and "50 000" in reply, "website prices")
+    assert_true("AI-фотосессия" not in reply, "must not reuse photoshoot")
+
+    followup = local_consultant_reply(
+        [
+            {"role": "user", "content": "AI-фотосессия"},
+            {"role": "user", "content": "а сколько?"},
+        ],
+        "ru",
+    )
+    assert_true("AI-фотосессия" in followup and "25 000" in followup, "true follow-up")
+
+    # Same class of bug: new topic words must not inherit the prior service.
+    for question in (
+        "сколько стоит дизайн",
+        "сколько стоит сделать баннер",
+        "а сколько сайт",
+    ):
+        switched = local_consultant_reply(
+            [
+                {"role": "user", "content": "AI-фотосессия"},
+                {"role": "user", "content": question},
+            ],
+            "ru",
+        )
+        assert_true(
+            "AI-фотосессия" not in switched,
+            f"must not reuse photoshoot for {question!r}: {switched}",
+        )
+
+
 def main():
     test_strip_assistant_history()
     test_proxy_client_ip()
     test_attachment_allowlist()
+    test_website_price_not_overridden_by_prior_service()
     print("test_chat_hardening: OK")
 
 
